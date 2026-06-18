@@ -255,93 +255,10 @@ export async function renderPagePng(
 // Markdown export
 // ---------------------------------------------------------------------------
 
-/**
- * Convert a parsed result to Markdown. Heuristics:
- *  - Items grouped per page, then by y-band (lines).
- *  - Font size bands:
- *      >= 22pt -> # heading
- *      >= 16pt -> ## heading
- *      >= 13pt -> ### heading
- *      else    -> paragraph
- *  - "- " prefixed lines become list items.
- *  - Empty bands become blank lines (paragraph break).
- *  - Each page is separated by `---`.
- */
-export function toMarkdown(
-  result: ParseResult,
-  meta?: { title?: string; source?: string; ocr?: boolean },
-): string {
-  const out: string[] = [];
-  const title = meta?.title ?? "Parsed PDF";
-  out.push(`# ${title}`);
-  out.push("");
-  if (meta?.source) {
-    out.push(`*Source: \`${meta.source}\`*`);
-    out.push("");
-  }
-  if (meta?.ocr) {
-    out.push("> Extracted with OCR fallback enabled.");
-    out.push("");
-  }
-
-  result.pages.forEach((page, pageIdx) => {
-    if (pageIdx > 0) {
-      out.push("");
-      out.push("---");
-      out.push("");
-    }
-    if (result.pages.length > 1) {
-      out.push(`## Page ${page.pageNumber}`);
-      out.push("");
-    }
-
-    const lines = groupIntoLines(page.items);
-    for (const line of lines) {
-      const text = line.map((i) => i.text).join(" ").trim();
-      if (!text) {
-        out.push("");
-        continue;
-      }
-      const maxFs = Math.max(
-        ...line.map((i) => i.fontSize ?? 11).filter((n) => Number.isFinite(n)),
-      );
-      // Detect bullet: line is just "-" or starts with "- " or similar.
-      if (/^[-*•·]\s*$/.test(text) || text === "-") {
-        // Will be combined with following content as a list item by caller.
-        out.push(`- ${text.replace(/^[-*•·]\s*/, "")}`.trim());
-        continue;
-      }
-      if (maxFs >= 22) {
-        out.push(`# ${text}`);
-      } else if (maxFs >= 16) {
-        out.push(`## ${text}`);
-      } else if (maxFs >= 13) {
-        out.push(`### ${text}`);
-      } else {
-        out.push(text);
-      }
-      out.push("");
-    }
-  });
-
-  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
-}
-
-function groupIntoLines(items: BBoxItem[]): BBoxItem[][] {
-  if (items.length === 0) return [];
-  // Sort top-to-bottom, left-to-right.
-  const sorted = [...items].sort((a, b) => {
-    if (Math.abs(a.bbox[1] - b.bbox[1]) > 4) return a.bbox[1] - b.bbox[1];
-    return a.bbox[0] - b.bbox[0];
-  });
-  const lines: BBoxItem[][] = [];
-  for (const it of sorted) {
-    const last = lines[lines.length - 1];
-    if (last && Math.abs(last[0].bbox[1] - it.bbox[1]) <= 4) {
-      last.push(it);
-    } else {
-      lines.push([it]);
-    }
-  }
-  return lines;
-}
+// Re-export the layout-aware Markdown converter. See ./markdown.ts for the
+// full heuristic pipeline (body-size clustering, heading levels by size
+// delta, list-marker detection, soft-hyphen dehyphenation, paragraph
+// grouping). It mirrors the structure of the upstream Rust
+// `markdown_layout/` pipeline used in LiteParse v2.1, ported to the
+// `BBoxItem[]` shape the WASM build gives us.
+export { toMarkdown } from "./markdown";
