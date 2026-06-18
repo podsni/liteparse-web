@@ -7,13 +7,19 @@ import {
   Download,
   ChevronLeft,
   ChevronRight,
-  Type,
   Search,
   ZoomIn,
   ZoomOut,
   Sun,
   Moon,
   ExternalLink,
+  Scan,
+  Copy,
+  Check,
+  WrapText,
+  Code2,
+  FileJson,
+  Heading2,
 } from "lucide-react";
 
 /** Inline brand mark — lucide dropped GH icon in v1.x. */
@@ -37,10 +43,13 @@ function Github({ size = 16, ...rest }: GithubProps) {
 import {
   parsePdf,
   renderPagePng,
+  toMarkdown,
   type BBoxItem,
   type PageData,
   type ParseResult,
+  type OcrEngine,
 } from "./lib/liteparse";
+import { loadOcrEngine } from "./lib/ocr";
 import { useTheme } from "./lib/use-theme";
 import { cn } from "./lib/cn";
 
@@ -89,12 +98,47 @@ export default function App() {
   const [parsing, setParsing] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [view, setView] = useState<"text" | "canvas">("text");
   const [query, setQuery] = useState("");
   const [zoom, setZoom] = useState(1);
   const [activeItem, setActiveItem] = useState<{ p: number; i: number } | null>(
     null,
   );
+  const [ocrEnabled, setOcrEnabled] = useState(false);
+  const [ocrEngine, setOcrEngine] = useState<OcrEngine | null>(null);
+
+  const runParse = useCallback(async (buf: Uint8Array) => {
+    setParsing(true);
+    setError(null);
+    setProgress("Loading WASM module…");
+    const t0 = performance.now();
+    try {
+      setProgress(ocrEnabled ? "Parsing PDF (OCR enabled)…" : "Parsing PDF…");
+      // Lazily load tesseract.js OCR engine the first time the user
+      // toggles OCR on. It downloads ~4MB of language data on first run.
+      let engine: OcrEngine | null = null;
+      if (ocrEnabled) {
+        if (!ocrEngine) {
+          setProgress("Loading OCR engine (first time, ~4MB)…");
+          const { engine: e } = await loadOcrEngine("eng");
+          setOcrEngine(e);
+          engine = e;
+        } else {
+          engine = ocrEngine;
+        }
+      }
+      const r = await parsePdf(buf, { ocrEnabled, ocrEngine: engine ?? undefined });
+      const ms = Math.round(performance.now() - t0);
+      setResult(r);
+      setProgress(null);
+      setParsing(false);
+      console.log(`[liteparse] parsed in ${ms} ms, ${r.pages.length} pages, ${r.text.length} chars (ocr=${ocrEnabled})`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(`Parse failed: ${msg}`);
+      setProgress(null);
+      setParsing(false);
+    }
+  }, [ocrEnabled, ocrEngine]);
 
   const onFile = useCallback(async (f: File) => {
     setError(null);
@@ -114,28 +158,7 @@ export default function App() {
     const buf = new Uint8Array(await f.arrayBuffer());
     setBytes(buf);
     void runParse(buf);
-  }, []);
-
-  const runParse = useCallback(async (buf: Uint8Array) => {
-    setParsing(true);
-    setError(null);
-    setProgress("Loading WASM module…");
-    const t0 = performance.now();
-    try {
-      setProgress("Parsing PDF…");
-      const r = await parsePdf(buf);
-      const ms = Math.round(performance.now() - t0);
-      setResult(r);
-      setProgress(null);
-      setParsing(false);
-      console.log(`[liteparse] parsed in ${ms} ms, ${r.pages.length} pages, ${r.text.length} chars`);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(`Parse failed: ${msg}`);
-      setProgress(null);
-      setParsing(false);
-    }
-  }, []);
+  }, [runParse]);
 
   const onPickUrl = useCallback(
     async (url: string) => {
@@ -263,8 +286,6 @@ export default function App() {
             result={result}
             page={page}
             setPage={setPage}
-            view={view}
-            setView={setView}
             query={query}
             setQuery={setQuery}
             zoom={zoom}
@@ -274,6 +295,9 @@ export default function App() {
             activeItem={activeItem}
             setActiveItem={setActiveItem}
             onReset={reset}
+            ocrEnabled={ocrEnabled}
+            setOcrEnabled={setOcrEnabled}
+            runParse={runParse}
           />
         )}
         {error && file && !parsing && (
@@ -443,15 +467,23 @@ function Hero({
             />
           </div>
 
-          <div className="mt-3 flex items-center gap-3">
+          <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <span className="kicker flex-shrink-0">or</span>
-            <span className="flex-1 h-px bg-[color:var(--color-rule-soft)] dark:bg-[color:var(--color-rule-d-soft)]" />
+            <span className="flex-1 min-w-[20px] h-px bg-[color:var(--color-rule-soft)] dark:bg-[color:var(--color-rule-d-soft)]" />
             <button
               type="button"
               className="btn btn-ghost flex-shrink-0"
               onClick={() => onUrl("./sample.pdf")}
             >
               <FileText size={14} aria-hidden /> Try sample
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost flex-shrink-0"
+              onClick={() => onUrl("./ocr-test.pdf")}
+              title="Image-only PDF to test OCR fallback"
+            >
+              <Scan size={14} aria-hidden /> Try OCR test
             </button>
           </div>
 
@@ -577,17 +609,18 @@ function Results(props: {
   result: ParseResult;
   page: number;
   setPage: (n: number) => void;
-  view: "text" | "canvas";
-  setView: (v: "text" | "canvas") => void;
   query: string;
   setQuery: (q: string) => void;
   zoom: number;
-  setZoom: (z: number) => void;
+  setZoom: React.Dispatch<React.SetStateAction<number>>;
   currentPage: PageData | null;
   highlightItems: BBoxItem[];
   activeItem: { p: number; i: number } | null;
   setActiveItem: (a: { p: number; i: number } | null) => void;
   onReset: () => void;
+  ocrEnabled: boolean;
+  setOcrEnabled: (b: boolean) => void;
+  runParse: (buf: Uint8Array) => Promise<void>;
 }) {
   const {
     file,
@@ -595,8 +628,6 @@ function Results(props: {
     result,
     page,
     setPage,
-    view,
-    setView,
     query,
     setQuery,
     zoom,
@@ -606,7 +637,48 @@ function Results(props: {
     activeItem,
     setActiveItem,
     onReset,
+    ocrEnabled,
+    setOcrEnabled,
+    runParse,
   } = props;
+
+  const [outputFormat, setOutputFormat] = useState<"markdown" | "text" | "json">(
+    "markdown",
+  );
+  const [wrap, setWrap] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const outputText = useMemo(() => {
+    if (outputFormat === "json") {
+      return JSON.stringify(
+        {
+          file: file.name,
+          pages: result.pages,
+          text: result.text,
+        },
+        null,
+        2,
+      );
+    }
+    if (outputFormat === "markdown") {
+      return toMarkdown(result, {
+        title: file.name.replace(/\.pdf$/i, ""),
+        source: file.name,
+        ocr: ocrEnabled,
+      });
+    }
+    return result.text;
+  }, [outputFormat, result, file.name, ocrEnabled]);
+
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(outputText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  }, [outputText]);
 
   return (
     <section className="pt-8 sm:pt-12 pb-8 fade-in">
@@ -634,25 +706,30 @@ function Results(props: {
           </a>
           <a
             href={URL.createObjectURL(
-              new Blob(
-                [
-                  JSON.stringify(
-                    {
-                      file: file.name,
-                      pages: result.pages,
-                      text: result.text,
-                    },
-                    null,
-                    2,
-                  ),
-                ],
-                { type: "application/json" },
-              ),
+              new Blob([outputFormat === "markdown" ? outputText : JSON.stringify({ file: file.name, pages: result.pages, text: result.text }, null, 2)], { type: "application/json" }),
             )}
             download={`${file.name.replace(/\.pdf$/i, "")}.json`}
             className="btn"
           >
             <Download size={14} aria-hidden /> JSON
+          </a>
+          <a
+            href={URL.createObjectURL(
+              new Blob(
+                [
+                  toMarkdown(result, {
+                    title: file.name.replace(/\.pdf$/i, ""),
+                    source: file.name,
+                    ocr: ocrEnabled,
+                  }),
+                ],
+                { type: "text/markdown" },
+              ),
+            )}
+            download={`${file.name.replace(/\.pdf$/i, "")}.md`}
+            className="btn"
+          >
+            <Download size={14} aria-hidden /> Markdown
           </a>
           <button type="button" className="btn btn-ghost" onClick={onReset}>
             <X size={14} aria-hidden /> Reset
@@ -660,29 +737,8 @@ function Results(props: {
         </div>
       </div>
 
-      {/* Toolbar: tabs + search + page nav */}
+      {/* Toolbar: search + OCR + page nav + zoom */}
       <div className="flex flex-wrap items-center gap-2 sm:gap-3 py-4">
-        <div className="inline-flex rounded-[4px] border border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] overflow-hidden">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "text"}
-            className={cn("chip rounded-none border-0", view === "text" && "chip-active")}
-            onClick={() => setView("text")}
-          >
-            <Type size={13} aria-hidden /> Text
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={view === "canvas"}
-            className={cn("chip rounded-none border-0", view === "canvas" && "chip-active")}
-            onClick={() => setView("canvas")}
-          >
-            <FileText size={13} aria-hidden /> Page
-          </button>
-        </div>
-
         <div className="flex-1 min-w-[180px] relative">
           <Search
             size={14}
@@ -701,6 +757,29 @@ function Results(props: {
           />
         </div>
 
+        <label
+          className={cn(
+            "inline-flex items-center gap-2 px-3 py-2 rounded-[4px] border cursor-pointer select-none text-xs font-mono transition-colors min-h-[40px]",
+            ocrEnabled
+              ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] dark:bg-[color:var(--color-accent-d-soft)]"
+              : "border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] hover:bg-[color:var(--color-paper-2)] dark:hover:bg-[color:var(--color-paper-d-2)]",
+          )}
+          title="Enable OCR fallback for image-only pages (slower)"
+        >
+          <input
+            type="checkbox"
+            checked={ocrEnabled}
+            onChange={(e) => {
+              setOcrEnabled(e.target.checked);
+              void runParse(bytes);
+            }}
+            className="sr-only"
+          />
+          <Scan size={13} aria-hidden />
+          <span>OCR</span>
+          {ocrEnabled && <span className="text-accent">on</span>}
+        </label>
+
         <PageNav
           page={page}
           total={result.pages.length}
@@ -708,27 +787,131 @@ function Results(props: {
         />
       </div>
 
-      {/* View */}
-      {view === "text" && currentPage ? (
-        <TextView
-          page={currentPage}
-          query={query}
-          highlightItems={highlightItems}
-          activeItem={activeItem}
-          setActiveItem={setActiveItem}
-        />
-      ) : currentPage ? (
-        <CanvasView
-          bytes={bytes}
-          page={currentPage}
-          query={query}
-          highlightItems={highlightItems}
-          activeItem={activeItem}
-          setActiveItem={setActiveItem}
-          zoom={zoom}
-          setZoom={setZoom}
-        />
-      ) : null}
+      {/* Side-by-side: PDF preview | Output preview */}
+      <div className="grid lg:grid-cols-2 gap-4">
+        {/* PDF Preview */}
+        <div className="surface p-3 sm:p-4 max-h-[80vh] overflow-auto">
+          <div className="flex items-center justify-between mb-3">
+            <p className="kicker text-muted">PDF preview</p>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => setZoom((z) => Math.max(0.5, z - 0.1))}
+                aria-label="Zoom out"
+                title="Zoom out"
+              >
+                <ZoomOut size={14} aria-hidden />
+              </button>
+              <span className="text-xs font-mono text-muted min-w-[40px] text-center">
+                {Math.round(zoom * 100)}%
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => setZoom((z) => Math.min(3, z + 0.1))}
+                aria-label="Zoom in"
+                title="Zoom in"
+              >
+                <ZoomIn size={14} aria-hidden />
+              </button>
+            </div>
+          </div>
+          {currentPage ? (
+            <CanvasView
+              bytes={bytes}
+              page={currentPage}
+              query={query}
+              highlightItems={highlightItems}
+              activeItem={activeItem}
+              setActiveItem={setActiveItem}
+              zoom={zoom}
+            />
+          ) : null}
+        </div>
+
+        {/* Output Preview */}
+        <div className="surface flex flex-col max-h-[80vh] overflow-hidden">
+          <div className="flex flex-wrap items-center gap-2 px-3 sm:px-4 py-3 border-b border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)]">
+            <p className="kicker text-muted">Output</p>
+            <div className="inline-flex rounded-[4px] border border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] overflow-hidden">
+              <button
+                type="button"
+                className={cn(
+                  "chip rounded-none border-0 gap-1.5",
+                  outputFormat === "markdown" && "chip-active",
+                )}
+                onClick={() => setOutputFormat("markdown")}
+                title="Markdown"
+              >
+                <Heading2 size={12} aria-hidden /> Markdown
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "chip rounded-none border-0 gap-1.5",
+                  outputFormat === "text" && "chip-active",
+                )}
+                onClick={() => setOutputFormat("text")}
+                title="Plain Text"
+              >
+                <Code2 size={12} aria-hidden /> Text
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "chip rounded-none border-0 gap-1.5",
+                  outputFormat === "json" && "chip-active",
+                )}
+                onClick={() => setOutputFormat("json")}
+                title="JSON (with bounding boxes)"
+              >
+                <FileJson size={12} aria-hidden /> JSON
+              </button>
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setWrap((w) => !w)}
+                className={cn(
+                  "chip gap-1.5 min-h-[36px]",
+                  wrap && "chip-active",
+                )}
+                title="Toggle line wrap"
+                aria-pressed={wrap}
+              >
+                <WrapText size={12} aria-hidden /> {wrap ? "Wrap: on" : "Wrap: off"}
+              </button>
+              <button
+                type="button"
+                onClick={onCopy}
+                className={cn("chip gap-1.5 min-h-[36px]", copied && "chip-active")}
+                title="Copy output to clipboard"
+                aria-live="polite"
+              >
+                {copied ? (
+                  <>
+                    <Check size={12} aria-hidden /> Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy size={12} aria-hidden /> Copy
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+          <pre
+            className={cn(
+              "flex-1 m-0 p-4 text-xs leading-relaxed font-mono overflow-auto bg-transparent",
+              wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre overflow-x-auto",
+            )}
+            aria-label={`${outputFormat} output`}
+          >
+            {outputText || "—"}
+          </pre>
+        </div>
+      </div>
     </section>
   );
 }
@@ -777,124 +960,6 @@ function PageNav({
 }
 
 // ---------------------------------------------------------------------------
-// Text view with bbox highlights
-// ---------------------------------------------------------------------------
-function TextView({
-  page,
-  query,
-  highlightItems,
-  activeItem,
-  setActiveItem,
-}: {
-  page: PageData;
-  query: string;
-  highlightItems: BBoxItem[];
-  activeItem: { p: number; i: number } | null;
-  setActiveItem: (a: { p: number; i: number } | null) => void;
-}) {
-  const out = useMemo(() => {
-    if (!query.trim()) {
-      return (
-        <pre className="parsed-output fade-in">
-          {page.items.map((it) => it.text).join("\n") ||
-            "No text extracted from this page."}
-        </pre>
-      );
-    }
-    const q = query.toLowerCase();
-    const hits = new Set<number>();
-    const hitTexts: string[] = [];
-    page.items.forEach((it, idx) => {
-      const t = it.text;
-      const lower = t.toLowerCase();
-      if (lower.includes(q)) {
-        hits.add(idx);
-        hitTexts.push(t);
-      }
-    });
-    const highlighted = page.items.map((it, idx) => {
-      if (!hits.has(idx)) return escapeHtml(it.text);
-      return `<mark class="bbox-hit" data-item-idx="${idx}">${escapeHtml(it.text)}</mark>`;
-    });
-    return (
-      <pre
-        className="parsed-output fade-in"
-        dangerouslySetInnerHTML={{
-          __html: highlighted.join("\n") || "(no match on this page)",
-        }}
-        onClick={(e) => {
-          const t = e.target as HTMLElement | null;
-          if (!t) return;
-          const mark = t.closest("mark.bbox-hit") as HTMLElement | null;
-          if (mark) {
-            const idx = Number(mark.dataset.itemIdx);
-            setActiveItem({ p: page.pageNumber, i: idx });
-            // Also scroll the matched bbox into view in canvas if needed.
-            const rect = mark.getBoundingClientRect();
-            window.scrollBy({ top: rect.top - 120, behavior: "smooth" });
-          }
-        }}
-      />
-    );
-  }, [page, query, setActiveItem]);
-
-  return (
-    <div className="grid lg:grid-cols-[1fr_280px] gap-5">
-      <div className="surface p-5 sm:p-7 max-h-[70vh] overflow-auto">
-        {out}
-      </div>
-      <aside className="surface p-5 max-h-[70vh] overflow-auto">
-        <p className="kicker text-accent">
-          Items · {query ? highlightItems.length : page.items.length}
-        </p>
-        <p className="mt-1 text-xs text-muted">
-          {query ? `Matching "${query}"` : "Click any item to inspect"}
-        </p>
-        <ul className="mt-4 space-y-2 text-sm">
-          {(query ? highlightItems : page.items).map((it, idx) => {
-            const itemIdx = query
-              ? page.items.findIndex((x) => x === it)
-              : idx;
-            const isActive =
-              activeItem?.p === page.pageNumber && activeItem?.i === itemIdx;
-            return (
-              <li key={`${idx}-${it.text.slice(0, 20)}`}>
-                <button
-                  type="button"
-                  className={cn(
-                    "w-full text-left p-2 rounded-[3px] hover:bg-[color:var(--color-paper-2)] dark:hover:bg-[color:var(--color-paper-d-2)] transition-colors",
-                    isActive && "bg-[color:var(--color-accent-soft)] dark:bg-[color:var(--color-accent-d-soft)]",
-                  )}
-                  onClick={() => {
-                    setActiveItem({ p: page.pageNumber, i: itemIdx });
-                    const el = document.querySelector(
-                      `[data-item-idx="${itemIdx}"]`,
-                    );
-                    if (el && "scrollIntoView" in el) {
-                      (el as HTMLElement).scrollIntoView({
-                        behavior: "smooth",
-                        block: "center",
-                      });
-                    }
-                  }}
-                >
-                  <p className="font-mono text-[0.8125rem] leading-snug truncate">
-                    {it.text || <span className="text-muted">·</span>}
-                  </p>
-                  <p className="mt-1 text-[0.6875rem] text-muted font-mono">
-                    {formatBbox(it.bbox)}
-                  </p>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </aside>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Canvas view: render page to PNG, overlay bboxes
 // ---------------------------------------------------------------------------
 function CanvasView({
@@ -905,7 +970,6 @@ function CanvasView({
   activeItem,
   setActiveItem,
   zoom,
-  setZoom,
 }: {
   bytes: Uint8Array;
   page: PageData;
@@ -914,7 +978,6 @@ function CanvasView({
   activeItem: { p: number; i: number } | null;
   setActiveItem: (a: { p: number; i: number } | null) => void;
   zoom: number;
-  setZoom: (z: number) => void;
 }) {
   const [png, setPng] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -962,117 +1025,56 @@ function CanvasView({
   }, [png, page, highlightItems, query, activeItem]);
 
   return (
-    <div className="grid lg:grid-cols-[1fr_300px] gap-5">
-      <div className="surface p-3 sm:p-5 overflow-auto max-h-[78vh]">
-        {loading && (
-          <div className="flex items-center justify-center p-12">
-            <Loader2 size={20} className="text-accent animate-spin" aria-hidden />
-          </div>
-        )}
-        {renderError && (
-          <div className="p-6 text-sm">
-            <p className="text-accent">Render failed: {renderError}</p>
-          </div>
-        )}
-        {png && (
-          <div
-            className="page-canvas-wrap mx-auto"
-            style={{
-              transform: `scale(${zoom})`,
-              transformOrigin: "top left",
-            }}
-          >
-            <img
-              src={png.dataUrl}
-              alt={`Page ${page.pageNumber}`}
-              width={png.width}
-              height={png.height}
-            />
-            <div className="bbox-overlay" aria-hidden>
-              {overlayRects.map((r) => (
-                <div
-                  key={r.idx}
-                  className={cn("bbox-rect", r.active && "is-active")}
-                  style={{
-                    left: `${r.left}px`,
-                    top: `${r.top}px`,
-                    width: `${r.width}px`,
-                    height: `${r.height}px`,
-                    opacity: query && r.isMatch ? 1 : 0.6,
-                  }}
-                  onClick={() =>
-                    setActiveItem({ p: page.pageNumber, i: r.idx })
-                  }
-                  title={r.text}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-      <aside className="surface p-5 flex flex-col gap-4">
-        <div>
-          <p className="kicker text-accent">Page canvas</p>
-          <p className="text-sm text-muted mt-1">
-            Rendered via PDF.js. Bounding boxes from LiteParse, overlaid in
-            the same coordinate space.
-          </p>
+    <div className="overflow-auto">
+      {loading && (
+        <div className="flex items-center justify-center p-12">
+          <Loader2 size={20} className="text-accent animate-spin" aria-hidden />
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="btn btn-icon"
-            onClick={() => setZoom(Math.max(0.4, zoom - 0.15))}
-            aria-label="Zoom out"
-          >
-            <ZoomOut size={14} aria-hidden />
-          </button>
-          <span className="font-mono text-xs text-muted">
-            {Math.round(zoom * 100)}%
-          </span>
-          <button
-            type="button"
-            className="btn btn-icon"
-            onClick={() => setZoom(Math.min(2.5, zoom + 0.15))}
-            aria-label="Zoom in"
-          >
-            <ZoomIn size={14} aria-hidden />
-          </button>
+      )}
+      {renderError && (
+        <div className="p-6 text-sm">
+          <p className="text-accent">Render failed: {renderError}</p>
         </div>
-        <div className="border-t border-[color:var(--color-rule-soft)] dark:border-[color:var(--color-rule-d-soft)] pt-4">
-          <p className="kicker">Items on page</p>
-          <ul className="mt-2 space-y-1 max-h-[40vh] overflow-auto text-sm">
-            {page.items.map((it, idx) => {
-              const isActive =
-                activeItem?.p === page.pageNumber && activeItem?.i === idx;
-              const isMatch = query ? it.text.toLowerCase().includes(query.toLowerCase()) : false;
-              return (
-                <li key={idx}>
-                  <button
-                    type="button"
-                    className={cn(
-                      "w-full text-left p-1.5 rounded-[3px] hover:bg-[color:var(--color-paper-2)] dark:hover:bg-[color:var(--color-paper-d-2)] transition-colors",
-                      isActive && "bg-[color:var(--color-accent-soft)] dark:bg-[color:var(--color-accent-d-soft)]",
-                      query && isMatch && "ring-1 ring-[color:var(--color-accent)]/40",
-                    )}
-                    onClick={() => setActiveItem({ p: page.pageNumber, i: idx })}
-                  >
-                    <p className="font-mono text-[0.75rem] truncate">
-                      {it.text || <span className="text-muted">·</span>}
-                    </p>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+      )}
+      {png && (
+        <div
+          className="page-canvas-wrap mx-auto"
+          style={{
+            transform: `scale(${zoom})`,
+            transformOrigin: "top left",
+          }}
+        >
+          <img
+            src={png.dataUrl}
+            alt={`Page ${page.pageNumber}`}
+            width={png.width}
+            height={png.height}
+            className="max-w-full h-auto block mx-auto"
+          />
+          <div className="bbox-overlay" aria-hidden>
+            {overlayRects.map((r) => (
+              <div
+                key={r.idx}
+                className={cn("bbox-rect", r.active && "is-active")}
+                style={{
+                  left: `${r.left}px`,
+                  top: `${r.top}px`,
+                  width: `${r.width}px`,
+                  height: `${r.height}px`,
+                  opacity: query && r.isMatch ? 1 : 0.6,
+                }}
+                onClick={() =>
+                  setActiveItem({ p: page.pageNumber, i: r.idx })
+                }
+                title={r.text}
+              />
+            ))}
+          </div>
         </div>
-      </aside>
+      )}
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Footer
 // ---------------------------------------------------------------------------
 function Footer() {
   return (
@@ -1111,15 +1113,3 @@ function Footer() {
 // ---------------------------------------------------------------------------
 // Utils
 // ---------------------------------------------------------------------------
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function formatBbox(b: [number, number, number, number]): string {
-  return `[${b[0].toFixed(1)}, ${b[1].toFixed(1)}, ${b[2].toFixed(1)}, ${b[3].toFixed(1)}]`;
-}
