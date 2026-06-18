@@ -4,30 +4,42 @@
  * The WASM is large (~4.5MB) so we lazy-load it on first use. We keep a
  * single parser instance and reuse it across pages / re-parses.
  *
- * The result shape from LiteParse.wasm:
+ * The actual result shape from LiteParse.wasm (verified against sample.pdf):
  *   {
  *     text: string,
  *     pages: [
  *       {
- *         pageNumber: number,
- *         width: number,
+ *         pageNum: number,        // 1-based page number
+ *         width: number,          // PDF user-space points
  *         height: number,
- *         items: [
- *           { text: string, bbox: [x1, y1, x2, y2], confidence?: number }
+ *         text: string,           // full text for the page
+ *         textItems: [
+ *           {
+ *             text: string,
+ *             x: number,          // top-left x in PDF points (origin = top-left)
+ *             y: number,          // top y in PDF points (origin = top-left)
+ *             width: number,
+ *             height: number,
+ *             fontName?: string,
+ *             fontSize?: number
+ *           }
  *         ]
  *       }
  *     ]
  *   }
  *
- * This wrapper normalizes + type-narrows the result.
+ * This wrapper normalizes + type-narrows the result and exposes a stable
+ * shape to the rest of the app: { pageNumber, width, height, items[] }.
+ * Each item's `bbox` is the [x0, y0, x1, y2] rectangle in points, origin top-left.
  */
 import init, { LiteParse } from "@llamaindex/liteparse-wasm";
 
 export interface BBoxItem {
   text: string;
-  /** [x1, y1, x2, y2] in PDF user-space points (origin = top-left in LiteParse). */
+  /** [x0, y0, x1, y1] in PDF user-space points, origin = top-left. */
   bbox: [number, number, number, number];
-  confidence?: number;
+  fontName?: string;
+  fontSize?: number;
 }
 
 export interface PageData {
@@ -79,37 +91,71 @@ export async function parsePdf(
   opts: ParseOptions = {},
 ): Promise<ParseResult> {
   const p = await getParser();
-  // Configure per-parse settings via the live config object.
-  // (LiteParse config is read on parse; mutating here is fine.)
   const cfg = p.config;
   if (opts.targetPages !== undefined) cfg.targetPages = opts.targetPages;
   if (opts.maxPages !== undefined) cfg.maxPages = opts.maxPages;
   if (opts.dpi !== undefined) cfg.dpi = opts.dpi;
 
-  const raw = (await p.parse(bytes)) as ParseResult;
+  const raw = (await p.parse(bytes)) as unknown as RawParseResult;
   return normalize(raw);
 }
 
-function normalize(raw: ParseResult): ParseResult {
-  const pages = (raw.pages ?? []).map((p) => ({
-    pageNumber: Number(p.pageNumber ?? 0),
-    width: Number(p.width ?? 0),
-    height: Number(p.height ?? 0),
-    items: (p.items ?? []).map((it) => {
-      const b = it.bbox ?? [];
+// ---------- Internal: raw WASM shape (kept loose because the WASM types
+// don't quite match the runtime payload) ----------
+
+interface RawTextItem {
+  text?: unknown;
+  x?: unknown;
+  y?: unknown;
+  width?: unknown;
+  height?: unknown;
+  fontName?: unknown;
+  fontSize?: unknown;
+  confidence?: unknown;
+}
+
+interface RawPage {
+  pageNum?: unknown;
+  width?: unknown;
+  height?: unknown;
+  text?: unknown;
+  textItems?: RawTextItem[];
+  items?: RawTextItem[]; // tolerate either key, just in case
+}
+
+interface RawParseResult {
+  text?: unknown;
+  pages?: RawPage[];
+}
+
+function normalize(raw: RawParseResult): ParseResult {
+  const pages: PageData[] = (raw.pages ?? []).map((p) => {
+    const width = Number(p.width ?? 0);
+    const height = Number(p.height ?? 0);
+    // The WASM ships text items as `textItems`; fall back to `items` defensively.
+    const rawItems = p.textItems ?? p.items ?? [];
+    const items: BBoxItem[] = rawItems.map((it) => {
+      // The WASM uses top-left origin in the shape we observed (x=60, y=18.9
+      // is the title drawn near the top of the page). Treat as such directly
+      // and only build bbox if we don't already have a confident top-left.
+      const x = Number(it.x ?? 0);
+      const y = Number(it.y ?? 0);
+      const w = Number(it.width ?? 0);
+      const h = Number(it.height ?? 0);
       return {
-        text: String(it.text ?? ""),
-        bbox: [
-          Number(b[0] ?? 0),
-          Number(b[1] ?? 0),
-          Number(b[2] ?? 0),
-          Number(b[3] ?? 0),
-        ] as [number, number, number, number],
-        confidence:
-          typeof it.confidence === "number" ? it.confidence : undefined,
+        text: String(it.text ?? "").trimEnd(),
+        bbox: [x, y, x + w, y + h] as [number, number, number, number],
+        fontName: typeof it.fontName === "string" ? it.fontName : undefined,
+        fontSize: typeof it.fontSize === "number" ? it.fontSize : undefined,
       };
-    }),
-  }));
+    });
+    return {
+      pageNumber: Number(p.pageNum ?? 0),
+      width,
+      height,
+      items,
+    };
+  });
   return {
     text: String(raw.text ?? ""),
     pages,
