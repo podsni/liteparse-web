@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Use our manual `data-theme` attribute as the dark mode trigger so the
+   `dark:` Tailwind variants follow the user toggled theme (not just the
+   system preference). */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* ----------------------------------------------------------------
    LiteParse Playground — design tokens
    Editorial magazine aesthetic. Cream paper, deep ink, gold accent.
@@ -44,6 +49,28 @@
   color-scheme: light dark;
 }
 
+/* Manual theme overrides — these win over the system pref because
+   the React app sets `data-theme` on <html> when the user toggles. */
+@layer base {
+:root[data-theme="dark"] {
+  --color-paper: var(--color-paper-d);
+  --color-paper-2: var(--color-paper-d-2);
+  --color-ink: var(--color-ink-d);
+  --color-ink-2: var(--color-ink-d-2);
+  --color-muted: var(--color-muted-d);
+  --color-rule: var(--color-rule-d);
+  --color-rule-soft: var(--color-rule-d-soft);
+  --color-accent: var(--color-accent-d);
+  --color-accent-soft: var(--color-accent-d-soft);
+  --color-accent-ink: var(--color-accent-d-ink);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+}
+
 html, body, #root {
   min-height: 100dvh;
 }
@@ -55,6 +82,7 @@ body {
   font-feature-settings: "ss01", "cv11", "cv02";
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  transition: background-color 0.2s ease-out, color 0.2s ease-out;
 }
 
 @media (prefers-color-scheme: dark) {

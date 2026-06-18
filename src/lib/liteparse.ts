@@ -147,7 +147,10 @@ export async function renderPagePng(
   const data = new Uint8Array(bytes);
   const loadingTask = pdfjs.getDocument({ data });
   const doc = await loadingTask.promise;
-  const page = await doc.getPage(pageNumber);
+  // PDF.js page numbers are 1-based. Defensive clamp in case the upstream
+  // pageNumber is 0-based (some parsers ship 0-based).
+  const safePage = Math.min(Math.max(1, pageNumber), doc.numPages);
+  const page = await doc.getPage(safePage);
   // scale = dpi / 72 (PDF default is 72dpi).
   const viewport = page.getViewport({ scale: dpi / 72 });
   const canvas = document.createElement("canvas");

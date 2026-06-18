@@ -20,15 +20,31 @@
 
     <!-- Open Graph -->
     <meta property="og:title" content="LiteParse Playground" />
+    <!-- Inline theme override: swaps the OKLCH tokens when the React app
+         sets `data-theme` on <html>. Tailwind v4's tree-shaking would
+         otherwise drop these rules, so we keep them inline. -->
+    <style>
+      :root[data-theme="dark"] {
+        --color-paper: var(--color-paper-d, lab(3.64541% 2.6405 2.77856));
+        --color-paper-2: var(--color-paper-d-2, lab(7.13384% 4.51558 4.89488));
+        --color-ink: var(--color-ink-d, lab(95.394% .703841 4.5323));
+        --color-ink-2: var(--color-ink-d-2, lab(79.1586% .839859 5.30039));
+        --color-muted: var(--color-muted-d, lab(55.8923% 2.40028 4.68735));
+        --color-rule: var(--color-rule-d, lab(21.0489% 4.08873 6.47681));
+        --color-rule-soft: var(--color-rule-d-soft, lab(11.7735% 3.72522 5.8749));
+        --color-accent: var(--color-accent-d, lab(74.1784% 21.1579 46.8148));
+        --color-accent-soft: var(--color-accent-d-soft, lab(18.5017% 13.7549 21.8396));
+        --color-accent-ink: var(--color-accent-d-ink, lab(38.6421% 35.0218 46.8619));
+        color-scheme: dark;
+      }
+      :root[data-theme="light"] { color-scheme: light; }
+      body { transition: background-color 0.2s ease-out, color 0.2s ease-out; }
+    </style>
     <meta property="og:description" content="Local PDF parsing, in your browser. No upload. No cloud. Open source." />
     <meta property="og:type" content="website" />
-    <script type="module" crossorigin src="/assets/index.CdhUFbwb.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime.BpQH8Ho1.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor.qkTZ20f5.js">
-    <link rel="modulepreload" crossorigin href="/assets/liteparse-wasm.Da5TayNd.js">
-    <link rel="stylesheet" crossorigin href="/assets/index.BwnpM8lv.css">
   </head>
   <body>
     <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

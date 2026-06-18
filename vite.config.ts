@@ -5,9 +5,10 @@ import tailwindcss from "@tailwindcss/vite";
 // LiteParse WASM is large and gzip-friendly. Configure asset handling so
 // the .wasm file is fetched on demand (lazy init) and gzipped at edge.
 export default defineConfig({
-  // Repo is served at https://podsni.github.io/liteparse-web/ via GitHub
-  // Pages. Use the matching base so absolute asset paths resolve correctly.
-  base: process.env["DEPLOY_TARGET"] === "gh-pages" ? "/liteparse-web/" : "/",
+  // Relative base (`./`) so the same dist works whether deployed at the
+  // origin, /liteparse-web/, or any other subpath. Vite rewrites asset
+  // URLs in index.html to relative form.
+  base: "./",
   plugins: [react(), tailwindcss()],
   server: {
     port: 5179,
@@ -21,6 +22,7 @@ export default defineConfig({
     target: "es2022",
     cssCodeSplit: true,
     sourcemap: false,
+    modulePreload: { polyfill: false },
     rollupOptions: {
       output: {
         // Stable filenames for CDN caching.

@@ -443,6 +443,18 @@ function Hero({
             />
           </div>
 
+          <div className="mt-3 flex items-center gap-3">
+            <span className="kicker flex-shrink-0">or</span>
+            <span className="flex-1 h-px bg-[color:var(--color-rule-soft)] dark:bg-[color:var(--color-rule-d-soft)]" />
+            <button
+              type="button"
+              className="btn btn-ghost flex-shrink-0"
+              onClick={() => onUrl("./sample.pdf")}
+            >
+              <FileText size={14} aria-hidden /> Try sample
+            </button>
+          </div>
+
           <div className="mt-4">
             <button
               type="button"
