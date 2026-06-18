@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/liteparse-web/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#F2EDE2" media="(prefers-color-scheme: light)" />
@@ -20,13 +20,33 @@
 
     <!-- Open Graph -->
     <meta property="og:title" content="LiteParse Playground" />
+    <!-- Inline theme override: swaps the OKLCH tokens when the React app
+         sets `data-theme` on <html>. Tailwind v4's tree-shaking would
+         otherwise drop these rules, so we keep them inline. -->
+    <style>
+      :root[data-theme="dark"] {
+        --color-paper: var(--color-paper-d, lab(3.64541% 2.6405 2.77856));
+        --color-paper-2: var(--color-paper-d-2, lab(7.13384% 4.51558 4.89488));
+        --color-ink: var(--color-ink-d, lab(95.394% .703841 4.5323));
+        --color-ink-2: var(--color-ink-d-2, lab(79.1586% .839859 5.30039));
+        --color-muted: var(--color-muted-d, lab(55.8923% 2.40028 4.68735));
+        --color-rule: var(--color-rule-d, lab(21.0489% 4.08873 6.47681));
+        --color-rule-soft: var(--color-rule-d-soft, lab(11.7735% 3.72522 5.8749));
+        --color-accent: var(--color-accent-d, lab(74.1784% 21.1579 46.8148));
+        --color-accent-soft: var(--color-accent-d-soft, lab(18.5017% 13.7549 21.8396));
+        --color-accent-ink: var(--color-accent-d-ink, lab(38.6421% 35.0218 46.8619));
+        color-scheme: dark;
+      }
+      :root[data-theme="light"] { color-scheme: light; }
+      body { transition: background-color 0.2s ease-out, color 0.2s ease-out; }
+    </style>
     <meta property="og:description" content="Local PDF parsing, in your browser. No upload. No cloud. Open source." />
     <meta property="og:type" content="website" />
-    <link rel="modulepreload" crossorigin href="data:text/javascript;base64,dmFyIGU9T2JqZWN0LmRlZmluZVByb3BlcnR5LHQ9KGUsdCk9PigpPT4odHx8KGUoKHQ9e2V4cG9ydHM6e319KS5leHBvcnRzLHQpLGU9bnVsbCksdC5leHBvcnRzKSxuPSh0LG4pPT57bGV0IHI9e307Zm9yKHZhciBpIGluIHQpZShyLGkse2dldDp0W2ldLGVudW1lcmFibGU6ITB9KTtyZXR1cm4gbnx8ZShyLFN5bWJvbC50b1N0cmluZ1RhZyx7dmFsdWU6YE1vZHVsZWB9KSxyfTtleHBvcnR7bix0fTs=">
-    <link rel="modulepreload" crossorigin href="/liteparse-web/assets/vendor.qkTZ20f5.DOKSyi3R.js">
-    <link rel="modulepreload" crossorigin href="/liteparse-web/assets/liteparse-wasm.Da5TayNd.s656Meho.js">
-    <script type="module" crossorigin src="/liteparse-web/assets/index.4QEI1kNE.js"></script>
-    <link rel="stylesheet" crossorigin href="/liteparse-web/assets/index.k6GKx3tb.css">
+    <script type="module" crossorigin src="./assets/index.BEMurtgy.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime.CMxvf4Kt.js">
+    <link rel="modulepreload" crossorigin href="./assets/vendor.D_YbTb3z.js">
+    <link rel="modulepreload" crossorigin href="./assets/liteparse-wasm.Bkc7jvjC.js">
+    <link rel="stylesheet" crossorigin href="./assets/index.DcP1KVpV.css">
   </head>
   <body>
     <div id="root"></div>

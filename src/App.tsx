@@ -20,7 +20,19 @@ import {
   Code2,
   FileJson,
   Heading2,
+  History,
+  Trash2,
+  Clock,
 } from "lucide-react";
+import {
+  saveToHistory,
+  listHistory,
+  deleteHistoryEntry,
+  clearHistory,
+  formatBytes,
+  formatRelativeTime,
+  type HistoryEntry,
+} from "./liteparse-history";
 
 /** Inline brand mark — lucide dropped GH icon in v1.x. */
 type GithubProps = Omit<React.SVGProps<SVGSVGElement>, "children"> & {
@@ -105,6 +117,9 @@ export default function App() {
   );
   const [ocrEnabled, setOcrEnabled] = useState(false);
   const [ocrEngine, setOcrEngine] = useState<OcrEngine | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [savedToast, setSavedToast] = useState<string | null>(null);
 
   const runParse = useCallback(async (buf: Uint8Array) => {
     setParsing(true);
@@ -132,13 +147,86 @@ export default function App() {
       setProgress(null);
       setParsing(false);
       console.log(`[liteparse] parsed in ${ms} ms, ${r.pages.length} pages, ${r.text.length} chars (ocr=${ocrEnabled})`);
+      // Persist to history (non-blocking). Skip OCR parses to keep entries
+      // consistent — users re-running with OCR can choose to re-OCR from
+      // history later.
+      if (!ocrEnabled) {
+        try {
+          const markdown = toMarkdown(r);
+          const text = r.text;
+          const json = JSON.stringify(
+            {
+              pages: r.pages.map((p) => ({
+                pageNumber: p.pageNumber,
+                width: p.width,
+                height: p.height,
+                items: p.items,
+              })),
+            },
+            null,
+            2,
+          );
+          // Copy buffer so we can keep it after the caller releases theirs.
+          const bufCopy = buf.slice().buffer;
+          const entry = await saveToHistory({
+            name: file?.name || "document.pdf",
+            size: file?.size ?? buf.byteLength,
+            type: "application/pdf",
+            markdown,
+            text,
+            json,
+            pageCount: r.pages.length,
+            itemCount: r.pages.reduce((s, p) => s + p.items.length, 0),
+            fileBytes: bufCopy,
+          });
+          setHistory((prev) => [entry, ...prev].slice(0, 20));
+          setSavedToast(`Saved to history · ${entry.name}`);
+          setTimeout(() => setSavedToast(null), 2400);
+        } catch (e) {
+          console.warn("[liteparse] history save failed:", e);
+        }
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(`Parse failed: ${msg}`);
       setProgress(null);
       setParsing(false);
     }
-  }, [ocrEnabled, ocrEngine]);
+  }, [ocrEnabled, ocrEngine, file]);
+
+  const onRestore = useCallback(async (entry: HistoryEntry) => {
+    setError(null);
+    setShowHistory(false);
+    const buf = new Uint8Array(entry.fileBytes.slice(0));
+    const f = new File([buf], entry.name, { type: entry.type });
+    setFile(f);
+    setBytes(buf);
+    setResult(null);
+    setQuery("");
+    setActiveItem(null);
+    setPage(1);
+    setSavedToast(`Restored · ${entry.name}`);
+    setTimeout(() => setSavedToast(null), 2400);
+    void runParse(buf);
+  }, [runParse]);
+
+  const onDeleteHistory = useCallback(async (id: string) => {
+    await deleteHistoryEntry(id);
+    setHistory((prev) => prev.filter((e) => e.id !== id));
+  }, []);
+
+  const onClearHistory = useCallback(async () => {
+    if (!confirm("Clear all history entries? This cannot be undone.")) return;
+    await clearHistory();
+    setHistory([]);
+  }, []);
+
+  // Load history on mount.
+  useEffect(() => {
+    listHistory()
+      .then(setHistory)
+      .catch((e) => console.warn("[liteparse] history load failed:", e));
+  }, []);
 
   const onFile = useCallback(async (f: File) => {
     setError(null);
@@ -274,6 +362,13 @@ export default function App() {
             onFile={onFile}
             onUrl={onPickUrl}
             error={error}
+            history={history}
+            onRestore={onRestore}
+            onDelete={onDeleteHistory}
+            onClear={onClearHistory}
+            showHistory={showHistory}
+            onToggleHistory={() => setShowHistory((s) => !s)}
+            savedToast={savedToast}
           />
         )}
         {parsing && (
@@ -372,10 +467,24 @@ function Hero({
   onFile,
   onUrl,
   error,
+  history,
+  onRestore,
+  onDelete,
+  onClear,
+  showHistory,
+  onToggleHistory,
+  savedToast,
 }: {
   onFile: (f: File) => void;
   onUrl: (u: string) => void;
   error: string | null;
+  history: HistoryEntry[];
+  onRestore: (e: HistoryEntry) => void;
+  onDelete: (id: string) => void;
+  onClear: () => void;
+  showHistory: boolean;
+  onToggleHistory: () => void;
+  savedToast: string | null;
 }) {
   const drop = useFileDrop(onFile);
   const [url, setUrl] = useState("");
@@ -528,11 +637,124 @@ function Hero({
               <p className="text-accent">{error}</p>
             </div>
           )}
+
+          <div className="mt-4">
+            <button
+              type="button"
+              className="btn btn-ghost w-full justify-center"
+              onClick={onToggleHistory}
+              aria-expanded={showHistory}
+              aria-controls="history-panel"
+            >
+              <History size={14} aria-hidden />
+              {showHistory ? "Hide history" : `Recent files${history.length ? ` · ${history.length}` : ""}`}
+            </button>
+            {showHistory && (
+              <HistoryPanel
+                history={history}
+                onRestore={onRestore}
+                onDelete={onDelete}
+                onClear={onClear}
+              />
+            )}
+          </div>
+
+          {savedToast && (
+            <div
+              className="mt-3 fade-in surface px-4 py-2.5 text-sm flex items-center gap-2"
+              role="status"
+            >
+              <Check size={14} className="text-accent" aria-hidden />
+              <span>{savedToast}</span>
+            </div>
+          )}
         </div>
       </div>
 
       <SampleDocs />
     </section>
+  );
+}
+
+function HistoryPanel({
+  history,
+  onRestore,
+  onDelete,
+  onClear,
+}: {
+  history: HistoryEntry[];
+  onRestore: (e: HistoryEntry) => void;
+  onDelete: (id: string) => void;
+  onClear: () => void;
+}) {
+  if (history.length === 0) {
+    return (
+      <div
+        id="history-panel"
+        className="mt-3 surface px-4 py-6 text-center text-sm text-muted fade-in"
+      >
+        <Clock size={20} className="mx-auto mb-2 text-accent" aria-hidden />
+        <p>No recent files yet.</p>
+        <p className="mt-1 text-xs">
+          Parse a PDF to see it saved here for quick re-open.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div
+      id="history-panel"
+      className="mt-3 surface p-2 fade-in"
+      role="region"
+      aria-label="Recent files history"
+    >
+      <div className="flex items-center justify-between px-2 pt-1.5 pb-2">
+        <p className="kicker">Recent · last 20</p>
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-xs text-muted hover:text-accent transition-colors"
+        >
+          Clear all
+        </button>
+      </div>
+      <ul className="space-y-1">
+        {history.map((entry) => (
+          <li
+            key={entry.id}
+            className="group flex items-center gap-2 px-2 py-2 rounded-[4px] hover:bg-[color:var(--color-paper-2)] dark:hover:bg-[color:var(--color-paper-d-2)] transition-colors"
+          >
+            <FileText
+              size={16}
+              className="text-accent flex-shrink-0"
+              aria-hidden
+            />
+            <button
+              type="button"
+              onClick={() => onRestore(entry)}
+              className="flex-1 min-w-0 text-left"
+              title={`Re-open ${entry.name}`}
+            >
+              <p className="text-sm font-medium truncate">{entry.name}</p>
+              <p className="text-xs text-muted">
+                {formatBytes(entry.size)} · {entry.pageCount}{" "}
+                {entry.pageCount === 1 ? "page" : "pages"} ·{" "}
+                {entry.itemCount} items · {formatRelativeTime(entry.addedAt)}
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(entry.id)}
+              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1.5 text-muted hover:text-accent transition-all"
+              aria-label={`Delete ${entry.name} from history`}
+              title="Remove from history"
+            >
+              <Trash2 size={14} aria-hidden />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
