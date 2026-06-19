@@ -11,12 +11,19 @@
  *
  * Heuristics (ordered):
  *   1. Estimate body font size (char-weighted mode, ignoring rotated items).
- *   2. Classify each line: heading if `size > body + epsilon`, by delta level.
- *   3. Detect bold via `fontName` substring ("Bold", "Heavy", "Black", "Demi").
- *   4. Detect list markers: bullet glyphs (`•·◦▪▸▶●○■□`) and ordered (`1.` `1)`).
- *   5. Group lines into paragraphs: gap > 1.5× line height, or font size change.
- *   6. Dehyphenate soft-hyphen wraps (`architec-` + `ture` → `architecture`).
- *   7. Reading order: Y-band sort (with band tolerance) then X within band.
+ *   2. Detect multi-column layout (X-clusters) → reading order grid projection.
+ *   3. Classify each line: heading if `size > body + epsilon`, by delta level.
+ *   4. Detect bold/italic via `fontName` substring patterns (only signal
+ *      the WASM build exposes).
+ *   5. Detect inline code via monospace font name (`Mono`, `Courier`, `Code`,
+ *      `Consolas`, `Inconsolata`, `Menlo`).
+ *   6. Detect list markers: bullet glyphs (`•·◦▪▸▶●○■□`) and ordered (`1.`)
+ *   7. Group lines into paragraphs: gap > 1.5× line height, or font size change.
+ *   8. Dehyphenate soft-hyphen wraps (`architec-` + `ture` → `architecture`).
+ *   9. Detect tables by column alignment (X-clusters of consistent gaps).
+ *  10. Convert typography: straight quotes → smart quotes, `--` → em-dash,
+ *      `...` → ellipsis.
+ *  11. Insert page-break markers between pages.
  */
 
 import type { BBoxItem, PageData, ParseResult } from "./liteparse";
@@ -25,10 +32,6 @@ import type { BBoxItem, PageData, ParseResult } from "./liteparse";
 
 const HEADING_EPSILON = 2.0; // pt — must be at least 2pt above body to count as heading
 // Heading level by font-size delta from body:
-//   >= 10pt above body -> H1
-//   >= 5pt above body  -> H2
-//   >= 2pt above body  -> H3
-//   short bold caption  -> H4
 const HEADING_LEVEL_THRESHOLDS: [number, 1 | 2 | 3 | 4 | 5 | 6][] = [
   [10, 1],
   [3, 2],
@@ -37,9 +40,14 @@ const HEADING_LEVEL_THRESHOLDS: [number, 1 | 2 | 3 | 4 | 5 | 6][] = [
 const PARAGRAPH_GAP_MULT = 1.2; // gap > 1.2x line height = new paragraph
 const Y_BAND_TOLERANCE = 0.4; // Y diff (fraction of line height) = same band
 const BULLET_CHARS = "•·◦▪▸▶●○■□–—−·";
-// Within a Y-band, if items are separated by >= this x-gap (in pt) and the
-// leftmost item is a list marker, treat them as separate list items.
 const LIST_SPLIT_X_GAP = 8;
+// Column detection: items in the same Y-band with X gap > this are separate columns.
+const COLUMN_X_GAP_RATIO = 0.15; // gap > 15% of page width
+const COLUMN_MIN_ITEMS = 3; // need at least 3 Y-bands to declare columns
+// Table detection
+const TABLE_MIN_ROWS = 2;
+const TABLE_MIN_COLS = 2;
+const TABLE_COL_GAP_TOLERANCE = 4; // pt tolerance for matching column edges
 
 // --- Public API -------------------------------------------------------------
 
@@ -47,8 +55,6 @@ export interface MarkdownOptions {
   title?: string;
   source?: string;
   ocr?: boolean;
-  /** Treat first text line on the first page as H1 if its size is > body+4. */
-  promoteFirstLine?: boolean;
 }
 
 export function toMarkdown(
@@ -61,13 +67,17 @@ export function toMarkdown(
 
 // --- Block model ------------------------------------------------------------
 
+type InlineRun = { text: string; bold?: boolean; italic?: boolean; code?: boolean; strike?: boolean };
+
 type Block =
   | { kind: "h"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
-  | { kind: "p"; text: string; bold: boolean }
-  | { kind: "ul"; items: string[] }
-  | { kind: "ol"; items: string[] }
+  | { kind: "p"; runs: InlineRun[] }
+  | { kind: "ul"; items: InlineRun[][] }
+  | { kind: "ol"; items: InlineRun[][] }
   | { kind: "hr" }
-  | { kind: "code"; text: string };
+  | { kind: "code"; text: string }
+  | { kind: "table"; header: InlineRun[][]; rows: InlineRun[][][] }
+  | { kind: "pagebreak" };
 
 interface RawLine {
   y: number;
@@ -77,6 +87,9 @@ interface RawLine {
   fontSize: number;
   fontName: string;
   bold: boolean;
+  italic: boolean;
+  mono: boolean;
+  runs: InlineRun[];
   items: BBoxItem[];
 }
 
@@ -88,13 +101,12 @@ function estimateBodySize(pages: PageData[]): number {
     for (const it of page.items) {
       if (it.fontSize == null || !Number.isFinite(it.fontSize)) continue;
       if (it.bbox[0] < 0 || it.bbox[1] < 0) continue;
-      // Round to nearest 0.5pt to avoid float jitter creating many bins.
       const key = Math.round(it.fontSize * 2) / 2;
       const w = (it.text || "").length || 1;
       weight.set(key, (weight.get(key) ?? 0) + w);
     }
   }
-  if (weight.size === 0) return 11; // sensible default
+  if (weight.size === 0) return 11;
   let best = 11;
   let bestW = -1;
   for (const [size, w] of weight) {
@@ -106,12 +118,27 @@ function estimateBodySize(pages: PageData[]): number {
   return best;
 }
 
+// --- Font name analysis -----------------------------------------------------
+
+const MONO_PATTERNS = [
+  /mono/i,
+  /courier/i,
+  /code/i,
+  /consolas/i,
+  /menlo/i,
+  /inconsolata/i,
+  /fira\s*code/i,
+  /source\s*code/i,
+  /roboto\s*mono/i,
+  /typewriter/i,
+  /fixed/i,
+  /terminal/i,
+];
+
 function isBoldFromName(name: string | undefined): boolean {
   if (!name) return false;
   const n = name.toLowerCase();
-  // Common bold tokens in PDF font names. Order matters — "semibold" comes
-  // before "bold" so we don't false-match. Italic check is separate.
-  return /bold|black|heavy|demi|extra(|-| )?bold|semibold/.test(n);
+  return /bold|black|heavy|demi|extra(|-| )?bold|semibold|medium(?![\w])/.test(n);
 }
 
 function isItalicFromName(name: string | undefined): boolean {
@@ -119,17 +146,31 @@ function isItalicFromName(name: string | undefined): boolean {
   return /italic|oblique/.test(name.toLowerCase());
 }
 
-// --- Line grouping (grid-projection style) ----------------------------------
+function isMonoFromName(name: string | undefined): boolean {
+  if (!name) return false;
+  return MONO_PATTERNS.some((p) => p.test(name));
+}
 
-function groupIntoLines(items: BBoxItem[]): RawLine[] {
-  if (items.length === 0) return [];
-  // Sort top→bottom, left→right.
+// --- Multi-column detection -------------------------------------------------
+
+interface ColumnInfo {
+  /** X boundaries (left edges of columns). */
+  leftEdges: number[];
+  /** Function: given an X, return which column index (0-based), or -1. */
+  indexOf: (x: number) => number;
+}
+
+function detectColumns(items: BBoxItem[], pageWidth: number): ColumnInfo | null {
+  if (items.length === 0 || pageWidth <= 0) return null;
+
+  // Bucket items into Y-bands first, then look at the X-distribution
+  // within each band. A multi-column page has at least 2 recurring X-clusters.
   const sorted = [...items].sort((a, b) => {
     const dy = a.bbox[1] - b.bbox[1];
-    if (Math.abs(dy) > 4) return dy;
+    if (Math.abs(dy) > 8) return dy;
     return a.bbox[0] - b.bbox[0];
   });
-  // First pass: Y-bands (rows). Within a band, items are sorted left→right.
+
   const bands: BBoxItem[][] = [];
   for (const it of sorted) {
     const last = bands[bands.length - 1];
@@ -143,9 +184,87 @@ function groupIntoLines(items: BBoxItem[]): RawLine[] {
     }
     bands.push([it]);
   }
-  // Second pass: split a band when it contains multiple list markers —
-  // e.g. four bullets on the same y at different x. We split at the
-  // boundary where the next item starts a new list item.
+
+  // Collect X-cluster: round each item's left X to nearest 5pt, build histogram.
+  const xHist = new Map<number, number>();
+  for (const band of bands) {
+    for (const it of band) {
+      const x = Math.round(it.bbox[0] / 5) * 5;
+      xHist.set(x, (xHist.get(x) ?? 0) + 1);
+    }
+  }
+  if (xHist.size < 2) return null;
+
+  // Sort X-bins by frequency, take top peaks that are far enough apart.
+  const bins = [...xHist.entries()].sort((a, b) => b[1] - a[1]);
+  const peaks: number[] = [];
+  const minXSep = pageWidth * COLUMN_X_GAP_RATIO;
+  for (const [x, count] of bins) {
+    if (count < COLUMN_MIN_ITEMS) break;
+    if (peaks.every((p) => Math.abs(p - x) >= minXSep)) {
+      peaks.push(x);
+    }
+    if (peaks.length >= 6) break; // max 6 columns
+  }
+  peaks.sort((a, b) => a - b);
+  if (peaks.length < 2) return null;
+
+  return {
+    leftEdges: peaks,
+    indexOf(x: number) {
+      let bestIdx = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < peaks.length; i++) {
+        const d = Math.abs(x - peaks[i]);
+        if (d < bestDist && d <= minXSep) {
+          bestDist = d;
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    },
+  };
+}
+
+// --- Line grouping with column-aware reading order -------------------------
+
+function groupIntoLines(
+  items: BBoxItem[],
+  pageWidth: number,
+): RawLine[] {
+  if (items.length === 0) return [];
+  const columns = detectColumns(items, pageWidth);
+
+  // Sort top→bottom, then left→right. If multi-column, items from column 0
+  // come entirely before column 1 in the same Y-band (reading order).
+  const sorted = [...items].sort((a, b) => {
+    const dy = a.bbox[1] - b.bbox[1];
+    if (Math.abs(dy) > 4) return dy;
+    // Same Y-band: use column-aware ordering if available.
+    if (columns) {
+      const ca = columns.indexOf(a.bbox[0]);
+      const cb = columns.indexOf(b.bbox[0]);
+      if (ca !== cb) return ca - cb;
+    }
+    return a.bbox[0] - b.bbox[0];
+  });
+
+  // First pass: Y-bands.
+  const bands: BBoxItem[][] = [];
+  for (const it of sorted) {
+    const last = bands[bands.length - 1];
+    if (last && last.length) {
+      const ref = last[0];
+      const h = Math.max(ref.bbox[3] - ref.bbox[1], 8);
+      if (Math.abs(ref.bbox[1] - it.bbox[1]) <= h * Y_BAND_TOLERANCE) {
+        last.push(it);
+        continue;
+      }
+    }
+    bands.push([it]);
+  }
+
+  // Second pass: split bands by list markers.
   const splitBands: BBoxItem[][] = [];
   for (const band of bands) {
     band.sort((a, b) => a.bbox[0] - b.bbox[0]);
@@ -154,9 +273,6 @@ function groupIntoLines(items: BBoxItem[]): RawLine[] {
       const prev = current[current.length - 1];
       const cur = band[i];
       const xGap = cur.bbox[0] - prev.bbox[2];
-      // If the next item starts a new list marker, and the gap between the
-      // previous item's right edge and the current item's left edge is
-      // wide enough, treat them as separate list items.
       if (startsWithListMarker(cur.text) && xGap > LIST_SPLIT_X_GAP) {
         splitBands.push(current);
         current = [cur];
@@ -166,28 +282,55 @@ function groupIntoLines(items: BBoxItem[]): RawLine[] {
     }
     splitBands.push(current);
   }
-  return splitBands.map((band) => {
-    const text = band
-      .map((i) => (i.text ?? "").trim())
-      .filter(Boolean)
-      .join(" ");
-    const fs = band[0]?.fontSize ?? 0;
-    const fn = band[0]?.fontName ?? "";
-    const h = band.reduce(
-      (m, i) => Math.max(m, i.bbox[3] - i.bbox[1]),
-      fs || 12,
-    );
-    return {
-      y: band[0].bbox[1],
-      x: band[0].bbox[0],
-      height: h,
-      text: text.replace(/\s+/g, " ").trim(),
-      fontSize: fs,
-      fontName: fn,
-      bold: isBoldFromName(fn),
-      items: band,
+
+  return splitBands.map((band) => buildRawLine(band));
+}
+
+function buildRawLine(band: BBoxItem[]): RawLine {
+  const fs = band[0]?.fontSize ?? 0;
+  const fn = band[0]?.fontName ?? "";
+  const h = band.reduce(
+    (m, i) => Math.max(m, i.bbox[3] - i.bbox[1]),
+    fs || 12,
+  );
+  // Build inline runs preserving bold/italic/mono per item, with spaces between
+  // runs of different styles (preserves word boundaries in the rendered text).
+  const runs: InlineRun[] = [];
+  for (const it of band) {
+    const t = (it.text ?? "").trim();
+    if (!t) continue;
+    const next: InlineRun = {
+      text: t,
+      bold: isBoldFromName(it.fontName),
+      italic: isItalicFromName(it.fontName),
+      code: isMonoFromName(it.fontName),
     };
-  });
+    if (runs.length && needsSpaceBetween(runs[runs.length - 1], next)) {
+      runs.push({ text: " " });
+    }
+    runs.push(next);
+  }
+  const text = runs.map((r) => r.text).join("").replace(/\s+/g, " ").trim();
+  return {
+    y: band[0].bbox[1],
+    x: band[0].bbox[0],
+    height: h,
+    text,
+    fontSize: fs,
+    fontName: fn,
+    bold: runs.some((r) => r.bold) && runs.every((r) => r.bold),
+    italic: runs.some((r) => r.italic),
+    mono: runs.some((r) => r.code),
+    runs,
+    items: band,
+  };
+}
+
+function needsSpaceBetween(prev: InlineRun, next: InlineRun): boolean {
+  // No space if either side already ends/starts with whitespace.
+  if (/\s$/.test(prev.text) || /^\s/.test(next.text)) return false;
+  // No space within the same style if both are pure prose.
+  return true;
 }
 
 // --- Paragraph / block construction ----------------------------------------
@@ -198,21 +341,19 @@ function buildBlocks(
 ): Block[] {
   const bodySize = estimateBodySize(result.pages);
   const out: Block[] = [];
-
-  // Build a "first line is title" heuristic.
   let firstPageFirst = true;
 
   for (let pageIdx = 0; pageIdx < result.pages.length; pageIdx++) {
     const page = result.pages[pageIdx];
-    const lines = groupIntoLines(page.items);
-    if (lines.length === 0) continue;
+    const lines = groupIntoLines(page.items, page.width);
+    if (lines.length === 0) {
+      if (pageIdx > 0) out.push({ kind: "pagebreak" });
+      continue;
+    }
 
-    // Skip the first line of page 1 if it's a giant title and the user
-    // already gave us a `title` (avoid duplicate H1).
     const skipFirst = firstPageFirst && !!opts.title;
     firstPageFirst = false;
 
-    // Classify lines first, then group into blocks.
     type Classified =
       | { kind: "h"; level: 1 | 2 | 3 | 4 | 5 | 6; line: RawLine }
       | { kind: "li"; ordered: boolean; line: RawLine }
@@ -223,30 +364,34 @@ function buildBlocks(
       if (skipFirst && i === 0) continue;
       const ln = lines[i];
       if (!ln.text) continue;
-
-      const cls = classifyLine(ln, bodySize);
-      classified.push(cls);
+      classified.push(classifyLine(ln, bodySize));
     }
 
-    // Detect horizontal rule: line that is just a sequence of dashes/underscores.
-    if (classified.length === 0) continue;
+    if (classified.length === 0) {
+      if (pageIdx > 0) out.push({ kind: "pagebreak" });
+      continue;
+    }
 
-    // Now group adjacent `p` lines into a single paragraph block, and
-    // collapse adjacent `li` into a single list block.
+    // --- Try table detection at current position ---
     let i = 0;
     while (i < classified.length) {
+      const tbl = tryBuildTableFrom(classified, i);
+      if (tbl) {
+        out.push({ kind: "table", header: tbl.header, rows: tbl.rows });
+        i += tbl.consumed;
+        continue;
+      }
       const c = classified[i];
 
       if (c.kind === "li") {
         const firstOrdered = c.ordered;
-        const items: string[] = [];
+        const items: InlineRun[][] = [];
         while (
           i < classified.length &&
           classified[i].kind === "li" &&
-          (classified[i] as Extract<Classified, { kind: "li" }>).ordered ===
-            firstOrdered
+          (classified[i] as Extract<Classified, { kind: "li" }>).ordered === firstOrdered
         ) {
-          items.push((classified[i] as Extract<Classified, { kind: "li" }>).line.text);
+          items.push((classified[i] as Extract<Classified, { kind: "li" }>).line.runs);
           i++;
         }
         out.push(firstOrdered ? { kind: "ol", items } : { kind: "ul", items });
@@ -260,48 +405,50 @@ function buildBlocks(
       }
 
       if (c.kind === "p") {
-        // Collect consecutive paragraph-classified lines that share a font
-        // size (or differ by < 0.5pt) and the gap between them is < 1.5x
-        // line height. Apply dehyphenation at the boundary.
-        const paras: string[] = [];
-        const initialBold = c.line.bold;
+        const paras: InlineRun[][] = [];
+        let buffer: InlineRun[] = [...c.line.runs];
         let currentFont = c.line.fontSize;
-        let buffer = c.line.text;
-        // Track the most recent RawLine so we can compute the gap to the
-        // next line for paragraph-break detection.
         let prevLine: RawLine = c.line;
         i++;
         while (i < classified.length) {
           const nxt = classified[i];
           if (nxt.kind !== "p") break;
-          const nxtLine: RawLine = nxt.line;
+          const nxtLine = nxt.line;
           const gap = nxtLine.y - (prevLine.y + prevLine.height);
-          const gapThreshold = prevLine.height * PARAGRAPH_GAP_MULT;
+          // Use font-size-derived line height (more reliable than bbox height
+          // which varies across fonts and rendering modes).
+          const lineHeight = Math.max(prevLine.fontSize * 1.2, prevLine.height);
+          const gapThreshold = lineHeight * PARAGRAPH_GAP_MULT;
           const sizeDelta = Math.abs(nxtLine.fontSize - currentFont);
           if (gap > gapThreshold || sizeDelta > 0.5) {
-            // New paragraph.
             paras.push(buffer);
-            buffer = nxtLine.text;
+            buffer = [...nxtLine.runs];
             currentFont = nxtLine.fontSize;
           } else {
-            buffer = dehyphenateJoin(buffer, nxtLine.text);
+            // Same paragraph — join, preserving code-line boundaries with \n.
+            buffer = dehyphenateJoinRuns(buffer, nxtLine.runs, true);
           }
           prevLine = nxtLine;
           i++;
         }
         paras.push(buffer);
-        for (const text of paras) {
-          if (looksLikeHorizontalRule(text)) {
+        for (const runs of paras) {
+          if (runs.length === 0) continue;
+          // Plain text for length checks; preserve newlines for code blocks.
+          const flatText = runs.map((r) => r.text).join("");
+          if (looksLikeHorizontalRule(flatText)) {
             out.push({ kind: "hr" });
-          } else if (looksLikeCodeBlock(text)) {
-            out.push({ kind: "code", text });
+          } else if (looksLikeCodeBlock(runs)) {
+            out.push({ kind: "code", text: flatText });
           } else {
-            out.push({ kind: "p", text, bold: initialBold });
+            out.push({ kind: "p", runs });
           }
         }
         continue;
       }
     }
+
+    if (pageIdx < result.pages.length - 1) out.push({ kind: "pagebreak" });
   }
 
   return out;
@@ -310,22 +457,19 @@ function buildBlocks(
 function classifyLine(
   ln: RawLine,
   bodySize: number,
-): { kind: "h"; level: 1 | 2 | 3 | 4 | 5 | 6; line: RawLine } | {
-  kind: "li";
-  ordered: boolean;
-  line: RawLine;
-} | { kind: "p"; line: RawLine } {
-  // 1. List marker?
+):
+  | { kind: "h"; level: 1 | 2 | 3 | 4 | 5 | 6; line: RawLine }
+  | { kind: "li"; ordered: boolean; line: RawLine }
+  | { kind: "p"; line: RawLine } {
   const m = parseListMarker(ln.text);
   if (m) {
     return {
       kind: "li",
       ordered: m.ordered,
-      line: { ...ln, text: m.remainder },
+      line: { ...ln, text: m.remainder, runs: trimLeadingRun(ln.runs, m.marker.length) },
     };
   }
 
-  // 2. Heading by size (and optionally by boldness for body-size headings).
   const delta = ln.fontSize - bodySize;
   if (delta > HEADING_EPSILON && ln.text.length < 200) {
     let level: 1 | 2 | 3 | 4 | 5 | 6 = 3;
@@ -338,20 +482,35 @@ function classifyLine(
     return { kind: "h", level, line: ln };
   }
 
-  // 3. Bold, short, sentence-case line right after a gap → body-size heading.
   if (
     ln.bold &&
-    !isItalicFromName(ln.fontName) &&
+    !ln.italic &&
     ln.text.length < 80 &&
     /^[A-Z]/.test(ln.text) &&
     !/[.!?]$/.test(ln.text)
   ) {
-    // Promote to H4 only if no other heading signal exists; the strict
-    // gap-check is done by the caller via paragraph grouping.
     return { kind: "h", level: 4, line: ln };
   }
 
   return { kind: "p", line: ln };
+}
+
+function trimLeadingRun(runs: InlineRun[], charCount: number): InlineRun[] {
+  let remaining = charCount;
+  const out: InlineRun[] = [];
+  for (const r of runs) {
+    if (remaining <= 0) {
+      out.push(r);
+      continue;
+    }
+    if (r.text.length <= remaining) {
+      remaining -= r.text.length;
+      continue;
+    }
+    out.push({ ...r, text: r.text.slice(remaining) });
+    remaining = 0;
+  }
+  return out;
 }
 
 function parseListMarker(
@@ -360,7 +519,6 @@ function parseListMarker(
   const trimmed = text.trimStart();
   if (!trimmed) return null;
 
-  // Bullet glyph
   const bullet = trimmed[0];
   if (BULLET_CHARS.includes(bullet) && /^\s/.test(trimmed[1] ?? " ")) {
     return {
@@ -370,7 +528,6 @@ function parseListMarker(
     };
   }
 
-  // Ordered: 1. / 1) / 12. / 12) followed by whitespace
   const m = /^(\d{1,3})[.)]\s+(.*)$/.exec(trimmed);
   if (m) {
     return { ordered: true, marker: m[1] + trimmed[m[1].length], remainder: m[2] };
@@ -383,18 +540,68 @@ function startsWithListMarker(text: string | undefined): boolean {
   return parseListMarker(text) !== null;
 }
 
-function dehyphenateJoin(prev: string, next: string): string {
-  const tPrev = prev.replace(/\s+$/, "");
-  if (!tPrev) return next;
-  // Soft-hyphen wrap: prev ends with `-` and previous char is a letter AND
-  // next starts with a lowercase letter → join without the hyphen.
+function dehyphenateJoinRuns(
+  prev: InlineRun[],
+  next: InlineRun[],
+  isLineContinuation = false,
+): InlineRun[] {
+  if (prev.length === 0) return next;
+  if (next.length === 0) return prev;
+  const lastPrev = prev[prev.length - 1];
+  const firstNext = next[0];
+  const tPrev = lastPrev.text.replace(/\s+$/, "");
+  const tNext = firstNext.text.replace(/^\s+/, "");
+  // Same style and both monospace: NO space (preserve code layout).
+  const sameStyle =
+    lastPrev.bold === firstNext.bold &&
+    lastPrev.italic === firstNext.italic &&
+    lastPrev.code === firstNext.code;
   if (
     /[A-Za-zÀ-ÿ]-$/.test(tPrev) &&
-    /^[a-zà-ÿ]/.test(next)
+    /^[a-zà-ÿ]/.test(tNext) &&
+    sameStyle
   ) {
-    return tPrev.slice(0, -1) + next;
+    const merged = tPrev.slice(0, -1) + tNext;
+    const newPrev = prev.slice(0, -1);
+    newPrev.push({ ...lastPrev, text: merged });
+    return [...newPrev, ...next.slice(1)];
   }
-  return tPrev + " " + next;
+  if (sameStyle && (lastPrev.code || firstNext.code)) {
+    // Code-to-code: no extra space, but if this is a line continuation
+    // (separate lines joined into a paragraph), insert a newline so each
+    // code line ends up on its own row inside the ``` block. Strip trailing
+    // whitespace from prev and leading whitespace from next so the lines
+    // don't accumulate stray spaces.
+    if (isLineContinuation) {
+      // Replace trailing whitespace in last run with newline.
+      const trimmedPrev = prev.slice(0, -1);
+      const lastT = lastPrev.text.replace(/\s+$/, "");
+      if (lastT) trimmedPrev.push({ ...lastPrev, text: lastT });
+      // Strip leading whitespace from first run of next.
+      const trimmedNext: InlineRun[] = [];
+      for (let j = 0; j < next.length; j++) {
+        const r = next[j];
+        if (j === 0) {
+          const t = r.text.replace(/^\s+/, "");
+          if (t) trimmedNext.push({ ...r, text: t });
+        } else {
+          trimmedNext.push(r);
+        }
+      }
+      const out2 = [...trimmedPrev, { text: "\n" }, ...trimmedNext];
+      return out2;
+    }
+    return [...prev, ...next];
+  }
+  if (prev.length && next.length) {
+    const sep = /\s$/.test(lastPrev.text) || /^\s/.test(firstNext.text) ? "" : " ";
+    return [
+      ...prev,
+      ...(sep ? [{ text: sep } as InlineRun] : []),
+      ...next,
+    ];
+  }
+  return [...prev, ...next];
 }
 
 function looksLikeHorizontalRule(text: string): boolean {
@@ -403,14 +610,122 @@ function looksLikeHorizontalRule(text: string): boolean {
   return /^([-_*=])\1{2,}$/.test(t);
 }
 
-function looksLikeCodeBlock(text: string): boolean {
-  // Heuristic: a line that is long, has no normal word boundaries, and
-  // contains monospace-looking tokens. Conservative — only fires for
-  // clearly non-prose shapes.
+function looksLikeCodeBlock(runs: InlineRun[]): boolean {
+  // Use plain concatenated text (no space-padding) so embedded \n stay intact.
+  const text = runs.map((r) => r.text).join("");
   if (text.length < 30) return false;
+  // Real content runs (ignore pure whitespace separators).
+  const real = runs.filter((r) => r.text.trim().length > 0);
+  if (real.length === 0) return false;
+  // A paragraph of monospace counts as code.
+  if (real.every((r) => r.code)) return true;
+  // Symbol/digit heavy.
   const letters = text.replace(/[^A-Za-z]/g, "").length;
-  if (letters / text.length < 0.3) return true; // symbol/digit heavy
-  return false;
+  return letters / text.length < 0.3;
+}
+
+// --- Table detection --------------------------------------------------------
+
+type Classified =
+  | { kind: "h"; level: 1 | 2 | 3 | 4 | 5 | 6; line: RawLine }
+  | { kind: "li"; ordered: boolean; line: RawLine }
+  | { kind: "p"; line: RawLine };
+
+function tryBuildTableFrom(
+  classified: Classified[],
+  start: number,
+): { header: InlineRun[][]; rows: InlineRun[][][]; consumed: number } | null {
+  if (start >= classified.length) return null;
+  const first = classified[start];
+  if (first.kind !== "p") return null;
+  // Get X-clustering from the first line: round each item x to nearest 4pt.
+  const firstXs = first.line.items.map((it) => Math.round(it.bbox[0] / 4) * 4);
+  if (firstXs.length < TABLE_MIN_COLS) return null;
+  // Build initial column guess by clustering unique Xs.
+  const cols = clusterColumns(firstXs);
+  if (cols.length < TABLE_MIN_COLS) return null;
+
+  // Try to extend: count how many subsequent lines also match the column pattern.
+  let end = start + 1;
+  while (end < classified.length) {
+    const c = classified[end];
+    if (c.kind !== "p") break;
+    const xs = c.line.items.map((it) => Math.round(it.bbox[0] / 4) * 4);
+    if (xs.length < cols.length) break;
+    // Each column must appear in this row (within tolerance).
+    let matches = 0;
+    for (const col of cols) {
+      if (xs.some((x) => Math.abs(x - col) <= TABLE_COL_GAP_TOLERANCE)) matches++;
+    }
+    if (matches < cols.length) break;
+    end++;
+  }
+
+  const totalRows = end - start;
+  if (totalRows < TABLE_MIN_ROWS) return null;
+
+  // Build table rows.
+  const rows: InlineRun[][][] = [];
+  for (let i = start; i < end; i++) {
+    const items = classified[i].line.items;
+    const cells: InlineRun[][] = cols.map(() => []);
+    for (const it of items) {
+      let bestCol = 0;
+      let bestDist = Infinity;
+      for (let ci = 0; ci < cols.length; ci++) {
+        const d = Math.abs(it.bbox[0] - cols[ci]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestCol = ci;
+        }
+      }
+      if (bestDist <= TABLE_COL_GAP_TOLERANCE) {
+        cells[bestCol].push(toRun(it));
+      }
+    }
+    rows.push(cells);
+  }
+
+  const header = rows.shift()!;
+  return { header, rows, consumed: end - start };
+}
+
+function clusterColumns(xs: number[]): number[] {
+  const sorted = [...xs].sort((a, b) => a - b);
+  const cols: number[] = [];
+  for (const x of sorted) {
+    if (cols.length === 0 || x - cols[cols.length - 1] > TABLE_COL_GAP_TOLERANCE * 2) {
+      cols.push(x);
+    }
+  }
+  return cols;
+}
+
+function toRun(it: BBoxItem): InlineRun {
+  return {
+    text: (it.text ?? "").trim(),
+    bold: isBoldFromName(it.fontName),
+    italic: isItalicFromName(it.fontName),
+    code: isMonoFromName(it.fontName),
+  };
+}
+
+// --- Typography conversion --------------------------------------------------
+
+const TYPOGRAPHY: [RegExp, string][] = [
+  [/---/g, "—"], // em-dash
+  [/--/g, "–"], // en-dash
+  [/\.{3}/g, "…"], // ellipsis
+  [/(^|[\s(\[{<])"/g, "$1“"], // open double
+  [/"/g, "”"], // close double
+  [/(^|[\s(\[{<])'/g, "$1‘"], // open single
+  [/'/g, "’"], // close single
+];
+
+function applyTypography(s: string): string {
+  let out = s;
+  for (const [re, repl] of TYPOGRAPHY) out = out.replace(re, repl);
+  return out;
 }
 
 // --- Rendering --------------------------------------------------------------
@@ -418,7 +733,7 @@ function looksLikeCodeBlock(text: string): boolean {
 function renderMarkdown(blocks: Block[], opts: MarkdownOptions): string {
   const out: string[] = [];
   if (opts.title) {
-    out.push(`# ${opts.title}`);
+    out.push(`# ${applyTypography(opts.title)}`);
     out.push("");
   }
   if (opts.source) {
@@ -432,20 +747,20 @@ function renderMarkdown(blocks: Block[], opts: MarkdownOptions): string {
   for (const b of blocks) {
     switch (b.kind) {
       case "h":
-        out.push(`${"#".repeat(b.level)} ${inlineMarkdown(b.text)}`);
+        out.push(`${"#".repeat(b.level)} ${applyTypography(b.text)}`);
         out.push("");
         break;
       case "p":
-        out.push(b.bold ? `**${inlineMarkdown(b.text)}**` : inlineMarkdown(b.text));
+        out.push(renderRuns(b.runs));
         out.push("");
         break;
       case "ul":
-        for (const it of b.items) out.push(`- ${inlineMarkdown(it)}`);
+        for (const it of b.items) out.push(`- ${renderRuns(it)}`);
         out.push("");
         break;
       case "ol":
         b.items.forEach((it, idx) =>
-          out.push(`${idx + 1}. ${inlineMarkdown(it)}`),
+          out.push(`${idx + 1}. ${renderRuns(it)}`),
         );
         out.push("");
         break;
@@ -454,9 +769,19 @@ function renderMarkdown(blocks: Block[], opts: MarkdownOptions): string {
         out.push("");
         break;
       case "code":
+        // For code blocks, preserve the run structure (don't insert extra
+        // spaces around \n) by joining the runs without whitespace padding.
         out.push("```");
         out.push(b.text);
         out.push("```");
+        out.push("");
+        break;
+      case "table":
+        out.push(renderTable(b.header, b.rows));
+        out.push("");
+        break;
+      case "pagebreak":
+        out.push("---");
         out.push("");
         break;
     }
@@ -464,8 +789,49 @@ function renderMarkdown(blocks: Block[], opts: MarkdownOptions): string {
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
-function inlineMarkdown(s: string): string {
-  // Avoid breaking existing emphasis; escape the rare `<` `>` that can
-  // appear in headings like "Min < 5". Otherwise, return as-is.
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function renderRuns(runs: InlineRun[]): string {
+  if (runs.length === 0) return "";
+  let out = "";
+  for (const r of runs) {
+    let t = applyTypography(r.text);
+    if (r.code) t = `\`${t}\``;
+    if (r.italic) t = `*${t}*`;
+    if (r.bold) t = `**${t}**`;
+    if (r.strike) t = `~~${t}~~`;
+    out += t;
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+function renderTable(header: InlineRun[][], rows: InlineRun[][][]): string {
+  const nCols = Math.max(header.length, ...rows.map((r) => r.length));
+  const cellWidths = new Array<number>(nCols).fill(3);
+  const flatHeader = expandCells(header, nCols).map((cell) => renderRuns(cell));
+  const flatRows = rows.map((r) =>
+    expandCells(r, nCols).map((cell) => renderRuns(cell)),
+  );
+  for (let i = 0; i < nCols; i++) {
+    cellWidths[i] = Math.max(
+      cellWidths[i],
+      flatHeader[i]?.length ?? 0,
+      ...flatRows.map((r) => r[i]?.length ?? 0),
+    );
+  }
+  const sep = (n: number) => "-".repeat(Math.max(3, n));
+  const pad = (s: string, n: number) => s + " ".repeat(Math.max(0, n - s.length));
+  const fmtRow = (cells: string[]) =>
+    "| " + cells.map((c, i) => pad(c, cellWidths[i])).join(" | ") + " |";
+  const lines: string[] = [];
+  lines.push(fmtRow(flatHeader));
+  lines.push("| " + cellWidths.map(sep).join(" | ") + " |");
+  for (const r of flatRows) lines.push(fmtRow(r));
+  return lines.join("\n");
+}
+
+function expandCells<T>(cells: T[], n: number): T[] {
+  const out: T[] = [...cells];
+  while (out.length < n) {
+    out.push({ text: "" } as unknown as T);
+  }
+  return out;
 }

@@ -1,4 +1,6 @@
-// Generate sample.pdf with proper headings, paragraphs, list items, bold.
+// Generate sample.pdf showcasing every feature the Markdown converter
+// understands: H1/H2 headings, paragraphs, bulleted + ordered lists, bold
+// paragraph, italic run, inline code block, and a simple 3-column table.
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { writeFileSync } from "node:fs";
 
@@ -6,9 +8,11 @@ const doc = await PDFDocument.create();
 const page = doc.addPage([612, 792]); // US Letter
 const helv = await doc.embedFont(StandardFonts.Helvetica);
 const helvBold = await doc.embedFont(StandardFonts.HelveticaBold);
+const helvOblique = await doc.embedFont(StandardFonts.HelveticaOblique);
+const courier = await doc.embedFont(StandardFonts.Courier);
 
 const margin = 72;
-let y = 720;
+let y = 740;
 
 // Title (h1)
 page.drawText("LiteParse Sample Document", {
@@ -31,12 +35,12 @@ page.drawText("Demonstrating layout-aware text extraction", {
 y -= 36;
 
 // Body paragraph 1
-const para1 = "This is paragraph one. LiteParse extracts text with bounding boxes for every word on every page. Each character carries spatial coordinates so downstream apps can highlight, search, or build citation links back to the source.";
+const para1 = `This is paragraph one. LiteParse extracts text with bounding boxes for every word on every page. Each character carries spatial coordinates so downstream apps can highlight, search, or build citation links back to the source.`;
 drawWrapped(page, para1, helv, 11, margin, y, 480, 14);
 y -= 14 * 4 + 10;
 
 // Body paragraph 2
-const para2 = "A second paragraph follows. Notice how multiple lines form a single block with aligned margins. Numbers like 1, 2, 3 and symbols like @, #, $ should be preserved exactly as they appear in the original document.";
+const para2 = `A second paragraph follows. Notice how multiple lines form a single block with aligned margins. Numbers like 1, 2, 3 and symbols like @, #, $ should be preserved exactly as they appear in the original document.`;
 drawWrapped(page, para2, helv, 11, margin, y, 480, 14);
 y -= 14 * 4 + 20;
 
@@ -88,17 +92,109 @@ for (let i = 0; i < ordered.length; i++) {
 }
 y -= 18;
 
-// Bold inline + paragraph
-page.drawText("Conclusion. ", {
+// Italic run + paragraph
+page.drawText("Note. ", {
   x: margin,
   y,
   size: 11,
   font: helvBold,
 });
-page.drawText(
-  "This document is intentionally simple. Real PDFs include multi-column layouts, headers, footers, and tables — LiteParse preserves them all through its grid projection and font-aware layout heuristics.",
-  { x: margin + 80, y, size: 11, font: helv }
-);
+page.drawText("This paragraph mixes a bold label with an ", {
+  x: margin + 40,
+  y,
+  size: 11,
+  font: helv,
+});
+page.drawText("italic phrase", {
+  x: margin + 40 + helv.widthOfTextAtSize("This paragraph mixes a bold label with an ", 11),
+  y,
+  size: 11,
+  font: helvOblique,
+});
+page.drawText(" and a ", {
+  x: margin + 40 +
+    helv.widthOfTextAtSize("This paragraph mixes a bold label with an ", 11) +
+    helvOblique.widthOfTextAtSize("italic phrase", 11),
+  y,
+  size: 11,
+  font: helv,
+});
+page.drawText("monospace `npm install`", {
+  x: margin + 40 +
+    helv.widthOfTextAtSize("This paragraph mixes a bold label with an ", 11) +
+    helvOblique.widthOfTextAtSize("italic phrase", 11) +
+    helv.widthOfTextAtSize(" and a ", 11),
+  y,
+  size: 11,
+  font: courier,
+});
+page.drawText(" call to illustrate inline code rendering.", {
+  x: margin + 40 +
+    helv.widthOfTextAtSize("This paragraph mixes a bold label with an ", 11) +
+    helvOblique.widthOfTextAtSize("italic phrase", 11) +
+    helv.widthOfTextAtSize(" and a ", 11) +
+    courier.widthOfTextAtSize("monospace `npm install`", 11),
+  y,
+  size: 11,
+  font: helv,
+});
+y -= 28;
+
+// Code block
+page.drawText("Quickstart", {
+  x: margin,
+  y,
+  size: 14,
+  font: helvBold,
+  color: rgb(0.07, 0.07, 0.07),
+});
+y -= 22;
+
+const codeLines = [
+  "$ npm i @llamaindex/liteparse-wasm",
+  "$ pnpm add pdf-lib",
+  "$ bun run dev",
+];
+for (const line of codeLines) {
+  page.drawText(line, { x: margin, y, size: 10, font: courier });
+  y -= 14;
+}
+y -= 14;
+
+// Simple 3-column table
+page.drawText("Library sizes", {
+  x: margin,
+  y,
+  size: 14,
+  font: helvBold,
+  color: rgb(0.07, 0.07, 0.07),
+});
+y -= 22;
+
+const tableTop = y;
+const col1X = margin;
+const col2X = margin + 130;
+const col3X = margin + 280;
+const rowHeight = 16;
+
+// Header row
+page.drawText("Package", { x: col1X, y, size: 11, font: helvBold });
+page.drawText("Gzipped", { x: col2X, y, size: 11, font: helvBold });
+page.drawText("Notes", { x: col3X, y, size: 11, font: helvBold });
+y -= rowHeight;
+
+// Data rows
+const rows = [
+  ["liteparse.wasm", "2.3 MB", "PDF + OCR ready"],
+  ["pdf.worker.min", "1.2 MB", "PDF.js renderer"],
+  ["tesseract.js", "0.4 MB", "OCR fallback (lazy)"],
+];
+for (const row of rows) {
+  page.drawText(row[0], { x: col1X, y, size: 11, font: helv });
+  page.drawText(row[1], { x: col2X, y, size: 11, font: helv });
+  page.drawText(row[2], { x: col3X, y, size: 11, font: helv });
+  y -= rowHeight;
+}
 
 const bytes = await doc.save();
 writeFileSync("public/sample.pdf", bytes);
