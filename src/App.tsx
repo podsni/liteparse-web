@@ -23,6 +23,12 @@ import {
   History,
   Trash2,
   Clock,
+  HardDrive,
+  Hash,
+  WholeWord,
+  Brackets,
+  BookOpen,
+  Maximize2,
 } from "lucide-react";
 import {
   saveToHistory,
@@ -120,6 +126,8 @@ export default function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [savedToast, setSavedToast] = useState<string | null>(null);
+  const [parseMs, setParseMs] = useState<number | null>(null);
+  const [ocrLang, setOcrLang] = useState<"eng" | "ind">("eng");
 
   const runParse = useCallback(async (buf: Uint8Array) => {
     setParsing(true);
@@ -134,7 +142,7 @@ export default function App() {
       if (ocrEnabled) {
         if (!ocrEngine) {
           setProgress("Loading OCR engine (first time, ~4MB)…");
-          const { engine: e } = await loadOcrEngine("eng");
+          const { engine: e } = await loadOcrEngine(ocrLang);
           setOcrEngine(e);
           engine = e;
         } else {
@@ -144,6 +152,7 @@ export default function App() {
       const r = await parsePdf(buf, { ocrEnabled, ocrEngine: engine ?? undefined });
       const ms = Math.round(performance.now() - t0);
       setResult(r);
+      setParseMs(ms);
       setProgress(null);
       setParsing(false);
       console.log(`[liteparse] parsed in ${ms} ms, ${r.pages.length} pages, ${r.text.length} chars (ocr=${ocrEnabled})`);
@@ -393,6 +402,9 @@ export default function App() {
             ocrEnabled={ocrEnabled}
             setOcrEnabled={setOcrEnabled}
             runParse={runParse}
+            parseMs={parseMs}
+            ocrLang={ocrLang}
+            setOcrLang={setOcrLang}
           />
         )}
         {error && file && !parsing && (
@@ -843,6 +855,9 @@ function Results(props: {
   ocrEnabled: boolean;
   setOcrEnabled: (b: boolean) => void;
   runParse: (buf: Uint8Array) => Promise<void>;
+  parseMs: number | null;
+  ocrLang: "eng" | "ind";
+  setOcrLang: (l: "eng" | "ind") => void;
 }) {
   const {
     file,
@@ -852,8 +867,6 @@ function Results(props: {
     setPage,
     query,
     setQuery,
-    zoom,
-    setZoom,
     currentPage,
     highlightItems,
     activeItem,
@@ -862,6 +875,9 @@ function Results(props: {
     ocrEnabled,
     setOcrEnabled,
     runParse,
+    parseMs,
+    ocrLang,
+    setOcrLang,
   } = props;
 
   const [outputFormat, setOutputFormat] = useState<"markdown" | "text" | "json">(
@@ -869,6 +885,9 @@ function Results(props: {
   );
   const [wrap, setWrap] = useState(false);
   const [copied, setCopied] = useState(false);
+  // PDF preview zoom: starts at 1.0 (100%) and the CanvasView auto-fits
+  // on first render and on container resize. User zoom overrides auto-fit.
+  const [pdfZoom, setPdfZoom] = useState(1);
 
   const outputText = useMemo(() => {
     if (outputFormat === "json") {
@@ -902,6 +921,27 @@ function Results(props: {
     }
   }, [outputText]);
 
+  // Derived stats for the parsed file. Used in the prominent stats strip
+  // and per-page sidebar.
+  const stats = useMemo(() => {
+    if (!result || !file) return null;
+    const totalChars = result.text.length;
+    const words = result.text.match(/\S+/g)?.length ?? 0;
+    const items = result.pages.reduce((n, p) => n + p.items.length, 0);
+    const sizeKB = file.size / 1024;
+    // 200 wpm average adult reading speed.
+    const readMin = words / 200;
+    return {
+      size: sizeKB < 1024 ? `${sizeKB.toFixed(1)} KB` : `${(sizeKB / 1024).toFixed(2)} MB`,
+      pages: result.pages.length,
+      chars: totalChars,
+      words,
+      items,
+      time: parseMs,
+      readMin,
+    };
+  }, [result, file, parseMs]);
+
   return (
     <section className="pt-8 sm:pt-12 pb-8 fade-in">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)]">
@@ -910,11 +950,6 @@ function Results(props: {
           <h2 className="font-display text-[1.5rem] sm:text-[1.875rem] mt-1.5 tracking-[-0.02em] truncate">
             {file.name}
           </h2>
-          <p className="mt-1 text-sm text-muted">
-            {(file.size / 1024).toFixed(0)} KB · {result.pages.length}{" "}
-            {result.pages.length === 1 ? "page" : "pages"} ·{" "}
-            {result.text.length.toLocaleString()} chars
-          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <a
@@ -959,6 +994,9 @@ function Results(props: {
         </div>
       </div>
 
+      {/* Stats strip — prominent display of parsing results */}
+      {stats && <StatsStrip stats={stats} />}
+
       {/* Toolbar: search + OCR + page nav + zoom */}
       <div className="flex flex-wrap items-center gap-2 sm:gap-3 py-4">
         <div className="flex-1 min-w-[180px] relative">
@@ -1002,6 +1040,20 @@ function Results(props: {
           {ocrEnabled && <span className="text-accent">on</span>}
         </label>
 
+        {/* OCR language picker (only shown when OCR is enabled) */}
+        {ocrEnabled && (
+          <select
+            value={ocrLang}
+            onChange={(e) => setOcrLang(e.target.value as "eng" | "ind")}
+            className="px-2 py-2 text-xs font-mono rounded-[4px] border border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] bg-transparent min-h-[40px]"
+            aria-label="OCR language"
+            title="Tesseract OCR language"
+          >
+            <option value="eng">English</option>
+            <option value="ind">Indonesian</option>
+          </select>
+        )}
+
         <PageNav
           page={page}
           total={result.pages.length}
@@ -1009,33 +1061,55 @@ function Results(props: {
         />
       </div>
 
+      {/* Page chip strip — quick navigation for multi-page PDFs */}
+      {result.pages.length > 1 && (
+        <PageChips
+          pages={result.pages}
+          currentPage={page}
+          onChange={setPage}
+        />
+      )}
+
       {/* Side-by-side: PDF preview | Output preview */}
-      <div className="grid lg:grid-cols-2 gap-4">
+      <div className="grid lg:grid-cols-[1.15fr_1fr] gap-3 sm:gap-4">
         {/* PDF Preview */}
-        <div className="surface p-3 sm:p-4 max-h-[80vh] overflow-auto">
-          <div className="flex items-center justify-between mb-3">
+        <div className="surface p-2.5 sm:p-4 overflow-hidden flex flex-col min-h-0">
+          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
             <p className="kicker text-muted">PDF preview</p>
             <div className="flex items-center gap-1">
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
-                onClick={() => setZoom((z) => Math.max(0.5, z - 0.1))}
+                onClick={() => {
+                  // User zoom overrides autoFit for the current page; the next
+                  // page change resets to autoFit.
+                  setPdfZoom((z) => Math.max(0.3, z - 0.1));
+                }}
                 aria-label="Zoom out"
-                title="Zoom out"
+                title="Zoom out (−)"
               >
                 <ZoomOut size={14} aria-hidden />
               </button>
-              <span className="text-xs font-mono text-muted min-w-[40px] text-center">
-                {Math.round(zoom * 100)}%
+              <span className="text-xs font-mono text-muted min-w-[44px] text-center tabular-nums">
+                {Math.round(pdfZoom * 100)}%
               </span>
               <button
                 type="button"
                 className="btn btn-ghost btn-icon"
-                onClick={() => setZoom((z) => Math.min(3, z + 0.1))}
+                onClick={() => setPdfZoom((z) => Math.min(3, z + 0.1))}
                 aria-label="Zoom in"
-                title="Zoom in"
+                title="Zoom in (+)"
               >
                 <ZoomIn size={14} aria-hidden />
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-icon"
+                onClick={() => setPdfZoom(1)}
+                aria-label="Reset zoom"
+                title="Reset zoom to 100% (re-fit on next page)"
+              >
+                <Maximize2 size={14} aria-hidden />
               </button>
             </div>
           </div>
@@ -1047,13 +1121,15 @@ function Results(props: {
               highlightItems={highlightItems}
               activeItem={activeItem}
               setActiveItem={setActiveItem}
-              zoom={zoom}
+              pdfZoom={pdfZoom}
+              setPdfZoom={setPdfZoom}
+              autoFit
             />
           ) : null}
         </div>
 
         {/* Output Preview */}
-        <div className="surface flex flex-col max-h-[80vh] overflow-hidden">
+        <div className="surface flex flex-col sm:max-h-[80vh] overflow-hidden">
           <div className="flex flex-wrap items-center gap-2 px-3 sm:px-4 py-3 border-b border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)]">
             <p className="kicker text-muted">Output</p>
             <div className="inline-flex rounded-[4px] border border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] overflow-hidden">
@@ -1191,7 +1267,9 @@ function CanvasView({
   highlightItems,
   activeItem,
   setActiveItem,
-  zoom,
+  pdfZoom,
+  setPdfZoom,
+  autoFit = false,
 }: {
   bytes: Uint8Array;
   page: PageData;
@@ -1199,11 +1277,15 @@ function CanvasView({
   highlightItems: BBoxItem[];
   activeItem: { p: number; i: number } | null;
   setActiveItem: (a: { p: number; i: number } | null) => void;
-  zoom: number;
+  pdfZoom: number;
+  setPdfZoom: (z: number) => void;
+  autoFit?: boolean;
 }) {
   const [png, setPng] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const effectiveZoom = pdfZoom;
 
   useEffect(() => {
     let cancelled = false;
@@ -1247,8 +1329,38 @@ function CanvasView({
       .filter((r) => r.isMatch || query);
   }, [png, page, highlightItems, query, activeItem]);
 
+  // Apply autoFit: compute the zoom level that fits the page width to the
+  // container. Re-runs on page change AND container resize (so rotating a
+  // phone or resizing a window keeps the page fitted).
+  useEffect(() => {
+    if (!autoFit || !png || !scrollRef.current) return;
+    const containerW = scrollRef.current.clientWidth;
+    if (containerW <= 0) return;
+    const targetW = Math.max(120, containerW - 32);
+    const fit = targetW / png.width;
+    setPdfZoom(fit);
+  }, [png, autoFit, page.pageNumber, setPdfZoom]);
+
+  // Watch container size for autoFit responsiveness on resize.
+  useEffect(() => {
+    if (!autoFit || !scrollRef.current) return;
+    const el = scrollRef.current;
+    const ro = new ResizeObserver(() => {
+      if (!png || !el) return;
+      const w = el.clientWidth;
+      if (w <= 0) return;
+      const targetW = Math.max(120, w - 32);
+      setPdfZoom(targetW / png.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [autoFit, png, setPdfZoom]);
+
   return (
-    <div className="overflow-auto">
+    <div
+      ref={scrollRef}
+      className="overflow-auto flex-1 min-h-0 sm:max-h-[78vh] max-h-[55vh] rounded-[4px] bg-[color:var(--color-rule-soft)]/30 dark:bg-[color:var(--color-rule-d-soft)]/30 flex items-start justify-center p-1 sm:p-2"
+    >
       {loading && (
         <div className="flex items-center justify-center p-12">
           <Loader2 size={20} className="text-accent animate-spin" aria-hidden />
@@ -1260,16 +1372,30 @@ function CanvasView({
         </div>
       )}
       {png && (
+        // Outer wrap takes the SCALED size in layout so the container
+        // doesn't have to scroll on mobile. Inner stack uses absolute
+        // positioning so its natural 1275×1650 dimensions don't push
+        // the layout — only the scaled outer wrap does.
         <div
-          className="page-canvas-wrap mx-auto"
+          className="page-canvas-wrap my-2"
           style={{
-            transform: `scale(${zoom})`,
-            transformOrigin: "top left",
+            width: png.width * effectiveZoom,
+            height: png.height * effectiveZoom,
+            position: "relative",
+            flexShrink: 0,
           }}
         >
           <div
-            className="page-canvas-stack relative"
-            style={{ width: png.width, height: png.height }}
+            className="page-canvas-stack"
+            style={{
+              width: png.width,
+              height: png.height,
+              transform: `scale(${effectiveZoom})`,
+              transformOrigin: "top left",
+              position: "absolute",
+              top: 0,
+              left: 0,
+            }}
           >
             <img
               src={png.dataUrl}
@@ -1311,7 +1437,124 @@ function CanvasView({
     </div>
   );
 }
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
+// Stats strip — prominent display of parsing results
+// --------------------------------------------------------------------------
+interface Stats {
+  size: string;
+  pages: number;
+  chars: number;
+  words: number;
+  items: number;
+  time: number | null;
+  readMin: number;
+}
+
+function StatsStrip({ stats }: { stats: Stats }) {
+  // Use 2 cols on mobile (with the last cell spanning both), 4 on tablet,
+  // 7 on desktop. The grid-cols-7 on desktop shows all stats in one row.
+  return (
+    <dl className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-px bg-[color:var(--color-rule-soft)] dark:bg-[color:var(--color-rule-d-soft)] border border-[color:var(--color-rule-soft)] dark:border-[color:var(--color-rule-d-soft)] rounded-[6px] overflow-hidden my-3">
+      <StatCell label="Size" value={stats.size} icon={<HardDrive size={12} aria-hidden />} />
+      <StatCell label="Pages" value={String(stats.pages)} icon={<FileText size={12} aria-hidden />} />
+      <StatCell label="Chars" value={stats.chars.toLocaleString()} icon={<Hash size={12} aria-hidden />} />
+      <StatCell label="Words" value={stats.words.toLocaleString()} icon={<WholeWord size={12} aria-hidden />} />
+      <StatCell label="Items" value={stats.items.toLocaleString()} icon={<Brackets size={12} aria-hidden />} />
+      <StatCell
+        label="Parse time"
+        value={stats.time != null ? formatMs(stats.time) : "—"}
+        icon={<Clock size={12} aria-hidden />}
+      />
+      <div className="col-span-2 sm:col-span-1">
+        <StatCell
+          label="Read time"
+          value={
+            stats.readMin < 1
+              ? `${Math.max(1, Math.round(stats.readMin * 60))}s`
+              : stats.readMin < 60
+                ? `${stats.readMin.toFixed(1)} min`
+                : `${(stats.readMin / 60).toFixed(1)} hr`
+          }
+          icon={<BookOpen size={12} aria-hidden />}
+        />
+      </div>
+    </dl>
+  );
+}
+
+function StatCell({
+  label,
+  value,
+  icon,
+}: {
+  label: string;
+  value: string;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="bg-surface dark:bg-surface-d px-3 py-2.5 flex flex-col gap-0.5">
+      <dt className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.08em] text-muted">
+        {icon}
+        {label}
+      </dt>
+      <dd className="text-base sm:text-lg font-display tracking-tight tabular-nums">{value}</dd>
+    </div>
+  );
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
+// --------------------------------------------------------------------------
+// Page chip strip — quick navigation for multi-page PDFs
+// --------------------------------------------------------------------------
+function PageChips({
+  pages,
+  currentPage,
+  onChange,
+}: {
+  pages: PageData[];
+  currentPage: number;
+  onChange: (n: number) => void;
+}) {
+  // Per-page char count = sum of all item.text lengths.
+  return (
+    <div className="flex flex-wrap gap-1.5 pb-3 -mt-1">
+      {pages.map((p, i) => {
+        const n = i + 1;
+        const active = currentPage === n;
+        const chars = p.items.reduce(
+          (sum, it) => sum + (it.text?.length ?? 0),
+          0,
+        );
+        return (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChange(n)}
+            className={cn(
+              "inline-flex flex-col items-center justify-center min-w-[44px] sm:min-w-[48px] min-h-[44px] px-2 py-1 rounded-[4px] border text-[11px] font-mono tabular-nums transition-colors",
+              active
+                ? "border-[color:var(--color-accent)] bg-[color:var(--color-accent-soft)] dark:bg-[color:var(--color-accent-d-soft)] text-[color:var(--color-accent)] dark:text-[color:var(--color-accent-d)]"
+                : "border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] text-muted hover:bg-[color:var(--color-paper-2)] dark:hover:bg-[color:var(--color-paper-d-2)]",
+            )}
+            aria-label={`Go to page ${n} (${chars.toLocaleString()} chars, ${p.items.length} items)`}
+            aria-current={active ? "page" : undefined}
+            title={`Page ${n} · ${chars.toLocaleString()} chars · ${p.items.length} items`}
+          >
+            <span className="font-display text-sm leading-none">{n}</span>
+            <span className="mt-0.5 text-[9px] opacity-70 leading-none">
+              {chars > 999 ? `${(chars / 1000).toFixed(1)}k` : chars}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function Footer() {
   return (
     <footer className="border-t border-[color:var(--color-rule-soft)] dark:border-[color:var(--color-rule-d-soft)] mt-12">
