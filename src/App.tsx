@@ -237,6 +237,16 @@ export default function App() {
       .catch((e) => console.warn("[liteparse] history load failed:", e));
   }, []);
 
+  // Reflect the active file in the browser tab title.
+  // Example: "docs.pdf — LiteParse Playground"
+  useEffect(() => {
+    const base = "LiteParse Playground";
+    document.title = file?.name ? `${file.name} — ${base}` : base;
+    return () => {
+      document.title = base;
+    };
+  }, [file?.name]);
+
   const onFile = useCallback(async (f: File) => {
     setError(null);
     setResult(null);
@@ -364,7 +374,7 @@ export default function App() {
 
   return (
     <div className="min-h-dvh">
-      <Header theme={theme} onToggleTheme={toggle} />
+      <Header theme={theme} onToggleTheme={toggle} fileName={file?.name} onReset={file ? reset : undefined} />
       <main className="mx-auto max-w-[1180px] px-4 sm:px-6 lg:px-10 pb-24">
         {!file && !parsing && (
           <Hero
@@ -428,25 +438,65 @@ export default function App() {
 function Header({
   theme,
   onToggleTheme,
+  fileName,
+  onReset,
 }: {
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  fileName?: string;
+  onReset?: () => void;
 }) {
   return (
     <header className="border-b border-[color:var(--color-rule-soft)] dark:border-[color:var(--color-rule-d-soft)]">
-      <div className="mx-auto max-w-[1180px] px-4 sm:px-6 lg:px-10 py-3 flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2.5 group" aria-label="LiteParse Playground home">
-          <span
-            className="font-display text-[1.5rem] sm:text-[1.625rem] tracking-[-0.025em] leading-none"
-            aria-hidden
-          >
-            Lite<span className="italic-verb text-accent">Parse</span>
-          </span>
-          <span className="hidden sm:inline-flex kicker border-l border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] pl-2.5 ml-0.5">
-            Playground
-          </span>
-        </a>
-        <nav className="flex items-center gap-1 sm:gap-2">
+      <div className="mx-auto max-w-[1180px] px-4 sm:px-6 lg:px-10 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+          <a href="/" className="flex items-center gap-2.5 group shrink-0" aria-label="LiteParse Playground home">
+            <span
+              className="font-display text-[1.5rem] sm:text-[1.625rem] tracking-[-0.025em] leading-none"
+              aria-hidden
+            >
+              Lite<span className="italic-verb text-accent">Parse</span>
+            </span>
+            <span className="hidden sm:inline-flex kicker border-l border-[color:var(--color-rule)] dark:border-[color:var(--color-rule-d)] pl-2.5 ml-0.5">
+              Playground
+            </span>
+          </a>
+          {fileName && (
+            <>
+              <span
+                className="hidden sm:inline-block text-[color:var(--color-rule)] dark:text-[color:var(--color-rule-d)]"
+                aria-hidden
+              >
+                /
+              </span>
+              <div
+                className="flex items-center gap-1.5 min-w-0 max-w-[60vw] sm:max-w-[420px]"
+                title={fileName}
+              >
+                <FileText
+                  size={13}
+                  className="shrink-0 text-[color:var(--color-accent)]"
+                  aria-hidden
+                />
+                <span className="kicker truncate text-ink/80 dark:text-[color:var(--color-ink-d)]/80">
+                  {fileName}
+                </span>
+                {onReset && (
+                  <button
+                    type="button"
+                    onClick={onReset}
+                    className="shrink-0 ml-0.5 p-0.5 rounded-sm text-[color:var(--color-rule)] hover:text-[color:var(--color-accent)] dark:text-[color:var(--color-rule-d)] dark:hover:text-[color:var(--color-accent)] transition-colors"
+                    aria-label="Close current file"
+                    title="Close file"
+                  >
+                    <X size={12} aria-hidden />
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+        <nav className="flex items-center gap-1 sm:gap-2 shrink-0">
           <a
             href="https://github.com/run-llama/liteparse"
             target="_blank"
