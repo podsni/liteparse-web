@@ -514,32 +514,44 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  overflow: visible;
 }
 
+/* SVG rect — stroke-based so it scales with viewBox cleanly. */
 .bbox-rect {
-  position: absolute;
-  border: 1px solid color-mix(in oklch, var(--color-accent) 60%, transparent);
-  background: color-mix(in oklch, var(--color-accent) 8%, transparent);
+  fill: color-mix(in oklch, var(--color-accent) 8%, transparent);
+  stroke: color-mix(in oklch, var(--color-accent) 60%, transparent);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
   pointer-events: auto;
   cursor: pointer;
-  transition: all 0.1s ease-out;
+  transition: fill 0.1s ease-out, stroke 0.1s ease-out;
+}
+
+.bbox-rect.is-faded {
+  fill: color-mix(in oklch, var(--color-accent) 4%, transparent);
+  stroke: color-mix(in oklch, var(--color-accent) 25%, transparent);
 }
 
 .bbox-rect:hover,
 .bbox-rect.is-active {
-  border-color: var(--color-accent);
-  background: color-mix(in oklch, var(--color-accent) 22%, transparent);
+  fill: color-mix(in oklch, var(--color-accent) 22%, transparent);
+  stroke: var(--color-accent);
 }
 
 @media (prefers-color-scheme: dark) {
   .bbox-rect {
-    border-color: color-mix(in oklch, var(--color-accent-d) 60%, transparent);
-    background: color-mix(in oklch, var(--color-accent-d) 8%, transparent);
+    fill: color-mix(in oklch, var(--color-accent-d) 8%, transparent);
+    stroke: color-mix(in oklch, var(--color-accent-d) 60%, transparent);
+  }
+  .bbox-rect.is-faded {
+    fill: color-mix(in oklch, var(--color-accent-d) 4%, transparent);
+    stroke: color-mix(in oklch, var(--color-accent-d) 25%, transparent);
   }
   .bbox-rect:hover,
   .bbox-rect.is-active {
-    border-color: var(--color-accent-d);
-    background: color-mix(in oklch, var(--color-accent-d) 22%, transparent);
+    fill: color-mix(in oklch, var(--color-accent-d) 22%, transparent);
+    stroke: var(--color-accent-d);
   }
 }
 

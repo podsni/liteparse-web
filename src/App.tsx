@@ -1226,22 +1226,23 @@ function CanvasView({
   }, [bytes, page.pageNumber]);
 
   // Convert PDF bbox (points) to image-px coords. PDF origin = top-left in
-  // LiteParse, so no y-flip needed for our overlay.
+  // LiteParse, so no y-flip needed for our overlay. The SVG viewBox maps
+  // 1:1 to PNG pixels, so the rects stay aligned regardless of CSS scaling.
   const overlayRects = useMemo(() => {
-    if (!png) return [] as { idx: number; left: number; top: number; width: number; height: number; active: boolean; text: string; isMatch: boolean }[];
+    if (!png) return [] as { idx: number; x: number; y: number; w: number; h: number; active: boolean; text: string; isMatch: boolean }[];
     const sx = png.width / page.width;
     const sy = png.height / page.height;
     const highlightSet = new Set(highlightItems);
     return page.items
       .map((it, idx) => {
         const [x1, y1, x2, y2] = it.bbox;
-        const left = x1 * sx;
-        const top = y1 * sy;
-        const width = Math.max(2, (x2 - x1) * sx);
-        const height = Math.max(2, (y2 - y1) * sy);
+        const x = x1 * sx;
+        const y = y1 * sy;
+        const w = Math.max(2, (x2 - x1) * sx);
+        const h = Math.max(2, (y2 - y1) * sy);
         const isMatch = query ? highlightSet.has(it) : true;
         const active = activeItem?.p === page.pageNumber && activeItem?.i === idx;
-        return { idx, left, top, width, height, active, text: it.text, isMatch };
+        return { idx, x, y, w, h, active, text: it.text, isMatch };
       })
       .filter((r) => r.isMatch || query);
   }, [png, page, highlightItems, query, activeItem]);
@@ -1266,31 +1267,44 @@ function CanvasView({
             transformOrigin: "top left",
           }}
         >
-          <img
-            src={png.dataUrl}
-            alt={`Page ${page.pageNumber}`}
-            width={png.width}
-            height={png.height}
-            className="max-w-full h-auto block mx-auto"
-          />
-          <div className="bbox-overlay" aria-hidden>
-            {overlayRects.map((r) => (
-              <div
-                key={r.idx}
-                className={cn("bbox-rect", r.active && "is-active")}
-                style={{
-                  left: `${r.left}px`,
-                  top: `${r.top}px`,
-                  width: `${r.width}px`,
-                  height: `${r.height}px`,
-                  opacity: query && r.isMatch ? 1 : 0.6,
-                }}
-                onClick={() =>
-                  setActiveItem({ p: page.pageNumber, i: r.idx })
-                }
-                title={r.text}
-              />
-            ))}
+          <div
+            className="page-canvas-stack relative"
+            style={{ width: png.width, height: png.height }}
+          >
+            <img
+              src={png.dataUrl}
+              alt={`Page ${page.pageNumber}`}
+              width={png.width}
+              height={png.height}
+              className="block max-w-full h-auto"
+              draggable={false}
+            />
+            <svg
+              className="bbox-overlay absolute inset-0 w-full h-full"
+              viewBox={`0 0 ${png.width} ${png.height}`}
+              preserveAspectRatio="none"
+              aria-hidden
+            >
+              {overlayRects.map((r) => (
+                <rect
+                  key={r.idx}
+                  x={r.x}
+                  y={r.y}
+                  width={r.w}
+                  height={r.h}
+                  className={cn(
+                    "bbox-rect",
+                    r.active && "is-active",
+                    !r.isMatch && "is-faded",
+                  )}
+                  onClick={() =>
+                    setActiveItem({ p: page.pageNumber, i: r.idx })
+                  }
+                >
+                  <title>{r.text}</title>
+                </rect>
+              ))}
+            </svg>
           </div>
         </div>
       )}
